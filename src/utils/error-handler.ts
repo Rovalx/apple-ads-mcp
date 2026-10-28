@@ -10,7 +10,7 @@ export function handleToolError(err: unknown): { content: { type: "text"; text: 
 
   if (err instanceof AppleAdsApiError) {
     const hint = err.status === 401 ? "Check your API credentials."
-      : err.status === 403 ? "Check organization permissions."
+      : err.status === 403 ? "Check ad account permissions. The X-AP-Context ad account id is not an organization id."
       : err.status === 404 ? "The resource was not found. Verify the ID is correct."
       : err.status === 429 ? "Rate limited. Try again in a moment."
       : "";

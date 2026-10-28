@@ -3,10 +3,12 @@ import { join } from "path";
 import { homedir } from "os";
 
 const STATE_DIR = join(homedir(), ".apple-ads-mcp");
-const STATE_FILE = join(STATE_DIR, "state.json");
+/** Separate from v5's state.json so an org id saved by 1.x is not reused as an ad account. */
+const STATE_FILE = join(STATE_DIR, "state-v1.json");
 
 interface State {
   orgId?: string;
+  adAccountId?: string;
 }
 
 export function loadState(): State {

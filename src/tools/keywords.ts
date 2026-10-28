@@ -1,12 +1,16 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
-import type { ApiListResponse, ApiResponse, Keyword, KeywordCreate, KeywordUpdate, NegativeKeyword, NegativeKeywordCreate, NegativeKeywordUpdate } from "../types/apple-ads.js";
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
-import { buildSelector } from "../utils/selectors.js";
+import type { ApiListResponse, ApiResponse, Keyword, NegativeKeyword } from "../types/apple-ads.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { formatMetrics, formatMoney } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { buildV1Query, buildV1Report, bulkBody, bulkEntities, equalsFilter, mapKeywordStatus, money, normalizeReportRows } from "../utils/v1.js";
+
+function keywordBid(kw: Keyword & { bid?: { amount: string; currency: string } | null }): { amount: string; currency: string } | null | undefined {
+  return kw.bidAmount ?? kw.bid;
+}
 
 export function registerKeywordTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool(
@@ -29,26 +33,20 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
         validateDate(startDate, "startDate");
         validateDate(endDate, "endDate");
 
-        const reportReq: ReportingRequest = {
-          startTime: startDate,
-          endTime: endDate,
-          selector: buildSelector({
+        const filters = [equalsFilter("campaignId", campaignId)];
+        if (adGroupId) filters.push(equalsFilter("adGroupId", adGroupId));
+        const resp = await client.post<ReportResponse<{ keywordId: number; keyword: string; matchType: string; bidAmount: { amount: string; currency: string } }>>(
+          "/reports/apps/keywords/query",
+          buildV1Report({
+            startDate,
+            endDate,
             limit: limit ?? 100,
             sortBy: sortBy ?? "localSpend",
             sortOrder: "DESCENDING",
-          }),
-          returnRowTotals: true,
-        };
-
-        const path = adGroupId
-          ? `/reports/campaigns/${campaignId}/adgroups/${adGroupId}/keywords`
-          : `/reports/campaigns/${campaignId}/keywords`;
-
-        const resp = await client.post<ReportResponse<{ keywordId: number; keyword: string; matchType: string; bidAmount: { amount: string; currency: string } }>>(
-          path,
-          reportReq
+            filters,
+          })
         );
-        const rows = resp.data.reportingDataResponse.row;
+        const rows = normalizeReportRows<{ keywordId: number; keyword: string; matchType: string; bidAmount: { amount: string; currency: string } }>(resp.data);
 
         if (rows.length === 0) {
           return { content: [{ type: "text", text: "No keyword data found." }] };
@@ -103,23 +101,15 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     },
     async ({ campaignId, adGroupId, limit, offset, sortBy, sortOrder, conditions }) => {
       try {
-        let resp: ApiListResponse<Keyword>;
-
-        if (conditions?.length || sortBy || !adGroupId) {
-          const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-          resp = await client.post<ApiListResponse<Keyword>>(
-            `/campaigns/${campaignId}/adgroups/targetingkeywords/find`,
-            selector
-          );
-        } else {
-          resp = await client.get<ApiListResponse<Keyword>>(
-            `/campaigns/${campaignId}/adgroups/${adGroupId}/targetingkeywords`,
-            { limit: String(limit ?? 200) }
-          );
-        }
+        const filters = [equalsFilter("campaignId", campaignId)];
+        if (adGroupId) filters.push(equalsFilter("adGroupId", adGroupId));
+        const resp = await client.post<ApiListResponse<Keyword>>(
+          "/keywords/query",
+          buildV1Query({ limit: limit ?? 200, offset, sortBy, sortOrder, conditions, filters })
+        );
 
         const text = resp.data
-          .map((kw) => `"${kw.text}" (${kw.matchType}, ID: ${kw.id}) — Bid: ${formatMoney(kw.bidAmount)} — Status: ${kw.status}`)
+          .map((kw) => `"${kw.text}" (${kw.matchType}, ID: ${kw.id}) — Bid: ${formatMoney(keywordBid(kw))} — Status: ${kw.status}`)
           .join("\n");
 
         return {
@@ -138,40 +128,34 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     "list_negative_keywords",
     {
       title: "List / Find Negative Keywords",
-      description: "List negative keywords at campaign or ad group level. Negative keywords prevent your ads from showing for specific search terms. Use get_search_term_report to identify wasteful terms, then add_negative_keywords to block them. NOTE: The Apple Search Ads API does not support filter conditions on negative keyword endpoints — use sorting and client-side filtering instead.",
+      description: "List negative keywords at campaign or ad group level. Negative keywords prevent your ads from showing for specific search terms. Use get_search_term_report to identify wasteful terms, then add_negative_keywords to block them. Platform API v1 requires an adGroupId condition: an ad group id for that ad group, or adGroupId IS_NULL together with campaignId EQUALS for campaign-level negatives. Extra conditions are sent as filters.",
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
-        adGroupId: z.number().optional().describe("Ad group ID (omit for campaign-level negatives)"),
+        adGroupId: z.number().optional().describe("Ad group ID (omit for campaign-level negatives, which query adGroupId IS_NULL)"),
         limit: z.number().optional().describe("Max results (default 1000)"),
         offset: z.number().optional().describe("Pagination offset"),
         sortBy: z.string().optional().describe("Field to sort by"),
         sortOrder: z.enum(["ASCENDING", "DESCENDING"]).optional(),
+        conditions: z.array(z.object({
+          field: z.string(),
+          operator: z.enum(["EQUALS", "GREATER_THAN", "LESS_THAN", "IN", "LIKE", "STARTSWITH", "CONTAINS", "NOT_EQUALS", "IS_NULL"]),
+          values: z.array(z.string()),
+        })).optional().describe("Additional filter conditions. Campaign-level listing already sends campaignId EQUALS and adGroupId IS_NULL."),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ campaignId, adGroupId, limit, offset, sortBy, sortOrder }) => {
+    async ({ campaignId, adGroupId, limit, offset, sortBy, sortOrder, conditions }) => {
       try {
-        let resp: ApiListResponse<NegativeKeyword>;
-
-        if (sortBy) {
-          const selector = buildSelector({ limit, offset, sortBy, sortOrder });
-          if (adGroupId) {
-            resp = await client.post<ApiListResponse<NegativeKeyword>>(
-              `/campaigns/${campaignId}/adgroups/negativekeywords/find`,
-              selector
-            );
-          } else {
-            resp = await client.post<ApiListResponse<NegativeKeyword>>(
-              `/campaigns/${campaignId}/negativekeywords/find`,
-              selector
-            );
-          }
-        } else {
-          const path = adGroupId
-            ? `/campaigns/${campaignId}/adgroups/${adGroupId}/negativekeywords`
-            : `/campaigns/${campaignId}/negativekeywords`;
-          resp = await client.get<ApiListResponse<NegativeKeyword>>(path, { limit: String(limit ?? 1000) });
-        }
+        const filters = adGroupId
+          ? [equalsFilter("adGroupId", adGroupId)]
+          : [
+              equalsFilter("campaignId", campaignId),
+              { field: "adGroupId", operator: "IS_NULL" },
+            ];
+        const resp = await client.post<ApiListResponse<NegativeKeyword>>(
+          "/negative-keywords/query",
+          buildV1Query({ limit: limit ?? 1000, offset, sortBy, sortOrder, conditions, filters })
+        );
 
         const text = resp.data
           .map((kw) => {
@@ -199,7 +183,7 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     "delete_targeting_keywords",
     {
       title: "Delete Targeting Keywords",
-      description: "Permanently delete targeting keywords from an ad group in bulk. This CANNOT be undone — the keyword and its historical association are removed. Consider pausing instead (update_targeting_keywords with status=PAUSED) to preserve bid history.",
+      description: "Delete targeting keywords. Platform API v1 uses POST /v1/keywords/bulk-delete (soft delete). campaignId and adGroupId are kept so existing calls still work; the API deletes by keyword id. Consider pausing instead (update_targeting_keywords with status=PAUSED) to preserve bid history.",
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
         adGroupId: z.number().describe("The ad group ID"),
@@ -210,8 +194,8 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     async ({ campaignId, adGroupId, keywordIds }) => {
       try {
         await client.post<unknown>(
-          `/campaigns/${campaignId}/adgroups/${adGroupId}/targetingkeywords/delete/bulk`,
-          keywordIds
+          "/keywords/bulk-delete",
+          bulkBody(keywordIds.map((id) => ({ id })))
         );
         return {
           content: [{ type: "text", text: `Deleted ${keywordIds.length} targeting keyword(s) from ad group ${adGroupId}.` }],
@@ -226,7 +210,7 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     "delete_negative_keywords",
     {
       title: "Delete Negative Keywords",
-      description: "Permanently delete negative keywords in bulk. After deletion, ads may start showing for previously blocked search terms. Only delete if you're sure those terms are no longer wasteful.",
+      description: "Delete negative keywords. Platform API v1 uses one negative-keyword resource and POST /v1/negative-keywords/bulk-delete, scoped by the keyword id rather than a campaign or ad-group path. campaignId and adGroupId are accepted so existing calls keep working.",
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
         adGroupId: z.number().optional().describe("Ad group ID (omit for campaign-level)"),
@@ -236,11 +220,10 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     },
     async ({ campaignId, adGroupId, keywordIds }) => {
       try {
-        const path = adGroupId
-          ? `/campaigns/${campaignId}/adgroups/${adGroupId}/negativekeywords/delete/bulk`
-          : `/campaigns/${campaignId}/negativekeywords/delete/bulk`;
-
-        await client.post<unknown>(path, keywordIds);
+        await client.post<unknown>(
+          "/negative-keywords/bulk-delete",
+          bulkBody(keywordIds.map((id) => ({ id })))
+        );
         const level = adGroupId ? `ad group ${adGroupId}` : `campaign ${campaignId}`;
         return {
           content: [{ type: "text", text: `Deleted ${keywordIds.length} negative keyword(s) at ${level} level.` }],
@@ -255,7 +238,7 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     "update_targeting_keywords",
     {
       title: "Update Targeting Keywords (Bulk)",
-      description: "Update targeting keywords in bulk — change status (ACTIVE/PAUSED) and/or bid amounts. Use to pause underperforming keywords or adjust bids based on get_keyword_report data. Pass an array of 1 for single-keyword updates. Bid changes take effect immediately and affect future auctions.",
+      description: "Update targeting keywords in bulk — change status (ACTIVE or PAUSED; ACTIVE is sent as ENABLED) and/or bid amounts. Calls POST /v1/keywords/bulk-update. Pass an array of 1 for a single keyword. Bid changes take effect immediately.",
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
         adGroupId: z.number().describe("The ad group ID"),
@@ -275,26 +258,25 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     async ({ campaignId, adGroupId, keywords, currency }) => {
       try {
         const cur = currency ?? "USD";
-        const body: KeywordUpdate[] = keywords.map((kw) => {
-          const update: KeywordUpdate = { id: kw.keywordId };
-          if (kw.status) update.status = kw.status;
-          if (kw.bidAmount) update.bidAmount = { amount: kw.bidAmount, currency: cur };
-          return update;
-        });
-
-        const resp = await client.put<ApiListResponse<Keyword>>(
-          `/campaigns/${campaignId}/adgroups/${adGroupId}/targetingkeywords/bulk`,
-          body
+        const resp = await client.post<ApiListResponse<Keyword>>(
+          "/keywords/bulk-update",
+          bulkBody(keywords.map((kw) => {
+            const data: Record<string, unknown> = { id: kw.keywordId };
+            if (kw.status) data.status = mapKeywordStatus(kw.status);
+            if (kw.bidAmount) data.bid = money(kw.bidAmount, cur);
+            return data;
+          }))
         );
+        const updated = bulkEntities<Keyword>(resp.data);
 
-        const summaries = resp.data.map(
-          (kw) => `"${kw.text}" — Status: ${kw.status}, Bid: ${formatMoney(kw.bidAmount)}`
+        const summaries = updated.map(
+          (kw) => `"${kw.text}" — Status: ${kw.status}, Bid: ${formatMoney(keywordBid(kw))}`
         );
 
         return {
           content: [
-            { type: "text", text: `Updated ${resp.data.length} keyword(s):\n${summaries.join("\n")}` },
-            { type: "text", text: JSON.stringify(resp.data, null, 2) },
+            { type: "text", text: `Updated ${updated.length} keyword(s):\n${summaries.join("\n")}` },
+            { type: "text", text: JSON.stringify(updated, null, 2) },
           ],
         };
       } catch (err) {
@@ -329,21 +311,22 @@ Match types: EXACT matches the exact query only (higher relevance, lower volume)
     async ({ campaignId, adGroupId, keywords, currency }) => {
       try {
         const cur = currency ?? "USD";
-        const body: KeywordCreate[] = keywords.map((kw) => ({
-          text: kw.text,
-          matchType: kw.matchType,
-          bidAmount: { amount: kw.bidAmount, currency: cur },
-        }));
-
         const resp = await client.post<ApiListResponse<Keyword>>(
-          `/campaigns/${campaignId}/adgroups/${adGroupId}/targetingkeywords/bulk`,
-          body
+          "/keywords/bulk-create",
+          bulkBody(keywords.map((kw) => ({
+            adGroupId,
+            text: kw.text,
+            matchType: kw.matchType,
+            status: "ENABLED",
+            bid: money(kw.bidAmount, cur),
+          })))
         );
+        const created = bulkEntities<Keyword>(resp.data);
 
         return {
           content: [
-            { type: "text", text: `Added ${resp.data.length} keywords to ad group ${adGroupId}.` },
-            { type: "text", text: JSON.stringify(resp.data, null, 2) },
+            { type: "text", text: `Added ${created.length} keywords to ad group ${adGroupId}.` },
+            { type: "text", text: JSON.stringify(created, null, 2) },
           ],
         };
       } catch (err) {
@@ -366,14 +349,12 @@ Match types: EXACT matches the exact query only (higher relevance, lower volume)
     },
     async ({ campaignId, adGroupId, keywordId }) => {
       try {
-        const resp = await client.get<ApiResponse<Keyword>>(
-          `/campaigns/${campaignId}/adgroups/${adGroupId}/targetingkeywords/${keywordId}`
-        );
+        const resp = await client.get<ApiResponse<Keyword>>(`/keywords/${keywordId}`);
         const kw = resp.data;
 
         return {
           content: [
-            { type: "text", text: `Keyword: "${kw.text}" (${kw.matchType}, ID: ${kw.id})\nBid: ${formatMoney(kw.bidAmount)}\nStatus: ${kw.status}` },
+            { type: "text", text: `Keyword: "${kw.text}" (${kw.matchType}, ID: ${kw.id})\nBid: ${formatMoney(keywordBid(kw))}\nStatus: ${kw.status}` },
             { type: "text", text: JSON.stringify(resp.data, null, 2) },
           ],
         };
@@ -397,11 +378,7 @@ Match types: EXACT matches the exact query only (higher relevance, lower volume)
     },
     async ({ campaignId, adGroupId, keywordId }) => {
       try {
-        const path = adGroupId
-          ? `/campaigns/${campaignId}/adgroups/${adGroupId}/negativekeywords/${keywordId}`
-          : `/campaigns/${campaignId}/negativekeywords/${keywordId}`;
-
-        const resp = await client.get<ApiResponse<NegativeKeyword>>(path);
+        const resp = await client.get<ApiResponse<NegativeKeyword>>(`/negative-keywords/${keywordId}`);
         const kw = resp.data;
         const level = adGroupId ? `ad group ${adGroupId}` : `campaign ${campaignId}`;
 
@@ -421,7 +398,7 @@ Match types: EXACT matches the exact query only (higher relevance, lower volume)
     "update_negative_keywords",
     {
       title: "Update Negative Keywords (Bulk)",
-      description: "Update negative keywords in bulk at the campaign or ad group level. Change status (ACTIVE/PAUSED), match type, or text. Pausing a negative keyword allows the previously blocked search term to trigger ads again.",
+      description: "Update negative keywords in bulk. Platform API v1 uses POST /v1/negative-keywords/bulk-update on one resource; campaign or ad-group scope is on the keyword itself. ACTIVE is sent as ENABLED. Pausing a negative keyword allows the previously blocked search term to trigger ads again.",
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
         adGroupId: z.number().optional().describe("Ad group ID (omit for campaign-level)"),
@@ -436,29 +413,27 @@ Match types: EXACT matches the exact query only (higher relevance, lower volume)
     },
     async ({ campaignId, adGroupId, keywords }) => {
       try {
-        const path = adGroupId
-          ? `/campaigns/${campaignId}/adgroups/${adGroupId}/negativekeywords/bulk`
-          : `/campaigns/${campaignId}/negativekeywords/bulk`;
-
-        const body: NegativeKeywordUpdate[] = keywords.map((kw) => {
-          const update: NegativeKeywordUpdate = { id: kw.keywordId };
-          if (kw.status) update.status = kw.status;
-          if (kw.matchType) update.matchType = kw.matchType;
-          if (kw.text) update.text = kw.text;
-          return update;
-        });
-
-        const resp = await client.put<ApiListResponse<NegativeKeyword>>(path, body);
+        const resp = await client.post<ApiListResponse<NegativeKeyword>>(
+          "/negative-keywords/bulk-update",
+          bulkBody(keywords.map((kw) => {
+            const data: Record<string, unknown> = { id: kw.keywordId };
+            if (kw.status) data.status = mapKeywordStatus(kw.status);
+            if (kw.matchType) data.matchType = kw.matchType;
+            if (kw.text) data.text = kw.text;
+            return data;
+          }))
+        );
+        const updated = bulkEntities<NegativeKeyword>(resp.data);
         const level = adGroupId ? `ad group ${adGroupId}` : `campaign ${campaignId}`;
 
-        const summaries = resp.data.map(
+        const summaries = updated.map(
           (kw) => `"${kw.text}" (${kw.matchType}) — Status: ${kw.status}`
         );
 
         return {
           content: [
-            { type: "text", text: `Updated ${resp.data.length} negative keyword(s) at ${level} level:\n${summaries.join("\n")}` },
-            { type: "text", text: JSON.stringify(resp.data, null, 2) },
+            { type: "text", text: `Updated ${updated.length} negative keyword(s) at ${level} level:\n${summaries.join("\n")}` },
+            { type: "text", text: JSON.stringify(updated, null, 2) },
           ],
         };
       } catch (err) {
@@ -488,18 +463,26 @@ Match types: EXACT matches the exact query only (higher relevance, lower volume)
     },
     async ({ campaignId, adGroupId, keywords }) => {
       try {
-        const path = adGroupId
-          ? `/campaigns/${campaignId}/adgroups/${adGroupId}/negativekeywords/bulk`
-          : `/campaigns/${campaignId}/negativekeywords/bulk`;
-
-        const body: NegativeKeywordCreate[] = keywords;
-        const resp = await client.post<ApiListResponse<NegativeKeyword>>(path, body);
+        const resp = await client.post<ApiListResponse<NegativeKeyword>>(
+          "/negative-keywords/bulk-create",
+          bulkBody(keywords.map((kw) => {
+            const data: Record<string, unknown> = {
+              text: kw.text,
+              matchType: kw.matchType,
+              status: "ENABLED",
+            };
+            if (adGroupId) data.adGroupId = adGroupId;
+            else data.campaignId = campaignId;
+            return data;
+          }))
+        );
+        const created = bulkEntities<NegativeKeyword>(resp.data);
 
         const level = adGroupId ? `ad group ${adGroupId}` : `campaign ${campaignId}`;
         return {
           content: [
-            { type: "text", text: `Added ${resp.data.length} negative keywords at ${level} level.` },
-            { type: "text", text: JSON.stringify(resp.data, null, 2) },
+            { type: "text", text: `Added ${created.length} negative keywords at ${level} level.` },
+            { type: "text", text: JSON.stringify(created, null, 2) },
           ],
         };
       } catch (err) {

@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
-import type { ApiListResponse, ApiResponse, BudgetOrder, BudgetOrderCreate, BudgetOrderUpdate } from "../types/apple-ads.js";
+import type { ApiListResponse, ApiResponse, BudgetOrder } from "../types/apple-ads.js";
+import { buildV1Query, money } from "../utils/v1.js";
 import { formatBudgetOrderSummary } from "../utils/formatters.js";
 import { toISO8601 } from "../utils/date-helpers.js";
 import { handleToolError } from "../utils/error-handler.js";
@@ -18,10 +19,10 @@ export function registerBudgetOrderTools(server: McpServer, client: AppleAdsClie
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ limit, offset }) => {
     try {
-      const resp = await client.get<ApiListResponse<BudgetOrder>>("/budgetorders", {
-        limit: String(limit ?? 50),
-        offset: String(offset ?? 0),
-      });
+      const resp = await client.post<ApiListResponse<BudgetOrder>>(
+        "/shared-budgets/query",
+        buildV1Query({ limit: limit ?? 50, offset })
+      );
 
       const summaries = resp.data.map(formatBudgetOrderSummary);
       const text = [
@@ -50,7 +51,7 @@ export function registerBudgetOrderTools(server: McpServer, client: AppleAdsClie
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ budgetOrderId }) => {
     try {
-      const resp = await client.get<ApiResponse<BudgetOrder>>(`/budgetorders/${budgetOrderId}`);
+      const resp = await client.get<ApiResponse<BudgetOrder>>(`/shared-budgets/${budgetOrderId}`);
       return {
         content: [
           { type: "text", text: formatBudgetOrderSummary(resp.data) },
@@ -84,27 +85,25 @@ export function registerBudgetOrderTools(server: McpServer, client: AppleAdsClie
       validateDate(startDate, "startDate");
       if (endDate) validateDate(endDate, "endDate");
 
-      const body: BudgetOrderCreate = {
+      const adAccountId = client.getAdAccountId();
+      const body: Record<string, unknown> = {
         name,
-        budget: { amount: budgetAmount, currency: currency ?? "USD" },
-        startDate: toISO8601(startDate),
+        startTime: toISO8601(startDate),
+        value: money(budgetAmount, currency ?? "USD"),
+        ...(adAccountId ? { adAccountIds: [Number(adAccountId)] } : {}),
       };
-      if (endDate) body.endDate = toISO8601(endDate);
-      if (supplySources) body.supplySources = supplySources;
-      if (orderNumber) body.orderNumber = orderNumber;
-      if (clientName) body.clientName = clientName;
-      if (primaryBuyerName) body.primaryBuyerName = primaryBuyerName;
-      if (primaryBuyerEmail) body.primaryBuyerEmail = primaryBuyerEmail;
-      if (billingEmail) body.billingEmail = billingEmail;
+      if (endDate) body.endTime = toISO8601(endDate);
+      if (primaryBuyerName || primaryBuyerEmail || billingEmail) {
+        body.invoiceDetail = { primaryBuyerName, primaryBuyerEmail, billingEmail };
+      }
+      const ignored = [supplySources && "supplySources", orderNumber && "orderNumber", clientName && "clientName"]
+        .filter(Boolean)
+        .join(", ");
 
-      const orgId = client.getOrgId();
-      const resp = await client.post<ApiResponse<BudgetOrder>>("/budgetorders", {
-        orgIds: orgId ? [Number(orgId)] : [],
-        bo: body,
-      });
+      const resp = await client.post<ApiResponse<BudgetOrder>>("/shared-budgets", body);
       return {
         content: [
-          { type: "text", text: `Created budget order "${resp.data.name}" (ID: ${resp.data.id})` },
+          { type: "text", text: `Created shared budget "${resp.data.name}" (ID: ${resp.data.id}).${ignored ? ` Ignored v5-only fields: ${ignored}.` : ""} Assign it with update_campaign is not automatic; v1 uses sharedBudgets on the campaign.` },
           { type: "text", text: JSON.stringify(resp.data, null, 2) },
         ],
       };
@@ -128,16 +127,16 @@ export function registerBudgetOrderTools(server: McpServer, client: AppleAdsClie
     try {
       if (endDate) validateDate(endDate, "endDate");
 
-      const body: BudgetOrderUpdate = {};
+      const body: Record<string, unknown> = {};
       if (name) body.name = name;
-      if (budgetAmount) body.budget = { amount: budgetAmount, currency: currency ?? "USD" };
-      if (endDate) body.endDate = endDate;
+      if (budgetAmount) body.value = money(budgetAmount, currency ?? "USD");
+      if (endDate) body.endTime = toISO8601(endDate);
 
       if (Object.keys(body).length === 0) {
         return { content: [{ type: "text", text: "No changes specified." }] };
       }
 
-      const resp = await client.put<ApiResponse<BudgetOrder>>(`/budgetorders/${budgetOrderId}`, { bo: body });
+      const resp = await client.put<ApiResponse<BudgetOrder>>(`/shared-budgets/${budgetOrderId}`, body);
       return {
         content: [
           { type: "text", text: `Updated budget order "${resp.data.name}" (ID: ${resp.data.id})` },

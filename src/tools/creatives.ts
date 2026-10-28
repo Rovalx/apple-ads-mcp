@@ -2,9 +2,9 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiListResponse, ApiResponse, Creative, ProductPage } from "../types/apple-ads.js";
-import { buildSelector } from "../utils/selectors.js";
 import { formatCreativeSummary } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
+import { buildV1Query, equalsFilter } from "../utils/v1.js";
 
 export function registerCreativeTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool("list_creatives", {
@@ -25,19 +25,11 @@ export function registerCreativeTools(server: McpServer, client: AppleAdsClient)
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ limit, offset, adamId, sortBy, sortOrder, conditions }) => {
     try {
-      let resp: ApiListResponse<Creative>;
-
-      if (conditions?.length || sortBy) {
-        const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-        resp = await client.post<ApiListResponse<Creative>>("/creatives/find", selector);
-      } else {
-        const params: Record<string, string> = {
-          limit: String(limit ?? 50),
-          offset: String(offset ?? 0),
-        };
-        if (adamId) params.adamId = String(adamId);
-        resp = await client.get<ApiListResponse<Creative>>("/creatives", params);
-      }
+      const filters = adamId ? [equalsFilter("adamId", adamId)] : undefined;
+      const resp = await client.post<ApiListResponse<Creative>>(
+        "/creatives/query",
+        buildV1Query({ limit: limit ?? 50, offset, sortBy, sortOrder, conditions, filters })
+      );
 
       const summaries = resp.data.map(formatCreativeSummary);
       const text = [
@@ -70,8 +62,17 @@ After creation, use create_ad to attach the creative to an ad group. Each ad gro
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async ({ adamId, name, productPageId }) => {
     try {
-      const body: Record<string, unknown> = { adamId, name, type: "CUSTOM_PRODUCT_PAGE" };
-      if (productPageId) body.productPageId = productPageId;
+      const body: Record<string, unknown> = {
+        name,
+        creativeType: productPageId ? "CUSTOM_PRODUCT_PAGE" : "DEFAULT_PRODUCT_PAGE",
+        destination: {
+          destinationType: "APP_STORE_PRODUCT_PAGE",
+          parameters: {
+            adamId: String(adamId),
+            ...(productPageId ? { productPageId } : {}),
+          },
+        },
+      };
 
       const resp = await client.post<ApiResponse<Creative>>("/creatives", body);
       return {
@@ -119,7 +120,7 @@ After creation, use create_ad to attach the creative to an ad group. Each ad gro
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ adamId, productPageId, includeLocales }) => {
     try {
-      const resp = await client.get<ApiResponse<ProductPage>>(`/apps/${adamId}/product-pages/${productPageId}`);
+      const resp = await client.get<ApiResponse<ProductPage>>(`/product-pages/${productPageId}`);
       const pp = resp.data;
 
       const content: { type: "text"; text: string }[] = [
@@ -128,8 +129,9 @@ After creation, use create_ad to attach the creative to an ad group. Each ad gro
       ];
 
       if (includeLocales) {
-        const locales = await client.get<ApiListResponse<Record<string, unknown>>>(
-          `/apps/${adamId}/product-pages/${productPageId}/locale-details`
+        const locales = await client.post<ApiListResponse<Record<string, unknown>>>(
+          "/product-pages/locale-details/query",
+          buildV1Query({ limit: 100, filters: [equalsFilter("productPageId", productPageId)] })
         );
         content.push(
           { type: "text", text: `\n${locales.data.length} locale(s):` },
@@ -152,7 +154,10 @@ After creation, use create_ad to attach the creative to an ad group. Each ad gro
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ adamId }) => {
     try {
-      const resp = await client.get<ApiListResponse<ProductPage>>(`/apps/${adamId}/product-pages`);
+      const resp = await client.post<ApiListResponse<ProductPage>>(
+        "/product-pages/query",
+        buildV1Query({ limit: 100, filters: [equalsFilter("adamId", adamId)] })
+      );
 
       const text = resp.data
         .map((pp) => `${pp.name} (ID: ${pp.id})${pp.isDefault ? " [DEFAULT]" : ""} — State: ${pp.state}`)

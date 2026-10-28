@@ -1,7 +1,7 @@
 {
   "name": "apple-ads-mcp",
-  "version": "1.0.4",
-  "description": "MCP server for Apple Search Ads API v5",
+  "version": "2.0.0",
+  "description": "MCP server for the Apple Ads Platform API v1",
   "mcpName": "io.github.Happygallo/apple-ads",
   "type": "module",
   "main": "dist/index.js",
