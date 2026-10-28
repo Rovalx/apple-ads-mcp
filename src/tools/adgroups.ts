@@ -3,10 +3,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiListResponse, ApiResponse, AdGroup } from "../types/apple-ads.js";
 import type { ReportResponse } from "../types/reporting.js";
-import { formatMetrics, formatMoney } from "../utils/formatters.js";
+import { formatEntityStatus, formatMetrics, formatMoney } from "../utils/formatters.js";
 import { toISO8601 } from "../utils/date-helpers.js";
 import { handleToolError } from "../utils/error-handler.js";
-import { validateDate } from "../utils/validators.js";
+import { validateDate, validateMonthlyRange } from "../utils/validators.js";
 import { adGroupBid, buildV1Query, buildV1Report, equalsFilter, money, normalizeReportRows } from "../utils/v1.js";
 
 export function registerAdGroupTools(server: McpServer, client: AppleAdsClient) {
@@ -41,7 +41,7 @@ export function registerAdGroupTools(server: McpServer, client: AppleAdsClient) 
           [
             `Ad Group: ${ag.name} (ID: ${ag.id})`,
             ag.campaignId ? `Campaign ID: ${ag.campaignId}` : null,
-            `Status: ${ag.displayStatus}`,
+            formatEntityStatus(ag),
             `Default Bid: ${formatMoney(adGroupBid(ag))}`,
             ag.cpaGoal ? `CPA Goal: ${formatMoney(ag.cpaGoal)}` : null,
             `Search Match: ${ag.automatedKeywordsOptIn ? "on" : "off"}`,
@@ -217,7 +217,7 @@ Defaults: status=ENABLED, pricingModel=CPT, startTime=today, Search Match off un
         const ag = resp.data;
         const text = [
           `Ad Group: ${ag.name} (ID: ${ag.id})`,
-          `Status: ${ag.displayStatus}`,
+          formatEntityStatus(ag),
           `Default Bid: ${formatMoney(adGroupBid(ag))}`,
           ag.cpaGoal ? `CPA Goal: ${formatMoney(ag.cpaGoal)}` : null,
           `Search Match: ${ag.automatedKeywordsOptIn ? "on" : "off"}`,
@@ -244,7 +244,7 @@ Defaults: status=ENABLED, pricingModel=CPT, startTime=today, Search Match off un
         campaignId: z.number().describe("The campaign ID"),
         startDate: z.string().describe("Start date (YYYY-MM-DD)"),
         endDate: z.string().describe("End date (YYYY-MM-DD)"),
-        granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY)"),
+        granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY). MONTHLY requires a whole-month range: start on YYYY-MM-01 and end on the last day of a month."),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -252,6 +252,7 @@ Defaults: status=ENABLED, pricingModel=CPT, startTime=today, Search Match off un
       try {
         validateDate(startDate, "startDate");
         validateDate(endDate, "endDate");
+        validateMonthlyRange(startDate, endDate, granularity);
 
         const reportReq = buildV1Report({
           startDate,

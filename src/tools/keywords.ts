@@ -128,25 +128,33 @@ export function registerKeywordTools(server: McpServer, client: AppleAdsClient) 
     "list_negative_keywords",
     {
       title: "List / Find Negative Keywords",
-      description: "List negative keywords at campaign or ad group level. Negative keywords prevent your ads from showing for specific search terms. Use get_search_term_report to identify wasteful terms, then add_negative_keywords to block them. NOTE: The Apple Search Ads API does not support filter conditions on negative keyword endpoints — use sorting and client-side filtering instead.",
+      description: "List negative keywords at campaign or ad group level. Negative keywords prevent your ads from showing for specific search terms. Use get_search_term_report to identify wasteful terms, then add_negative_keywords to block them. Platform API v1 requires an adGroupId condition: an ad group id for that ad group, or adGroupId IS_NULL together with campaignId EQUALS for campaign-level negatives. Extra conditions are sent as filters.",
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
-        adGroupId: z.number().optional().describe("Ad group ID (omit for campaign-level negatives)"),
+        adGroupId: z.number().optional().describe("Ad group ID (omit for campaign-level negatives, which query adGroupId IS_NULL)"),
         limit: z.number().optional().describe("Max results (default 1000)"),
         offset: z.number().optional().describe("Pagination offset"),
         sortBy: z.string().optional().describe("Field to sort by"),
         sortOrder: z.enum(["ASCENDING", "DESCENDING"]).optional(),
+        conditions: z.array(z.object({
+          field: z.string(),
+          operator: z.enum(["EQUALS", "GREATER_THAN", "LESS_THAN", "IN", "LIKE", "STARTSWITH", "CONTAINS", "NOT_EQUALS", "IS_NULL"]),
+          values: z.array(z.string()),
+        })).optional().describe("Additional filter conditions. Campaign-level listing already sends campaignId EQUALS and adGroupId IS_NULL."),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ campaignId, adGroupId, limit, offset, sortBy, sortOrder }) => {
+    async ({ campaignId, adGroupId, limit, offset, sortBy, sortOrder, conditions }) => {
       try {
         const filters = adGroupId
           ? [equalsFilter("adGroupId", adGroupId)]
-          : [equalsFilter("campaignId", campaignId)];
+          : [
+              equalsFilter("campaignId", campaignId),
+              { field: "adGroupId", operator: "IS_NULL" },
+            ];
         const resp = await client.post<ApiListResponse<NegativeKeyword>>(
           "/negative-keywords/query",
-          buildV1Query({ limit: limit ?? 1000, offset, sortBy, sortOrder, filters })
+          buildV1Query({ limit: limit ?? 1000, offset, sortBy, sortOrder, conditions, filters })
         );
 
         const text = resp.data

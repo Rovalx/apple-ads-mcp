@@ -4,7 +4,7 @@ import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiResponse, ApiListResponse, Campaign, AdGroup } from "../types/apple-ads.js";
 import type { ReportResponse } from "../types/reporting.js";
 import { resolveDateRange, type DatePreset } from "../utils/date-helpers.js";
-import { formatCampaignSummary, formatMetrics, formatMoney } from "../utils/formatters.js";
+import { formatCampaignSummary, formatEntityStatus, formatMetrics, formatMoney } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
 import { adGroupBid, buildV1Query, buildV1Report, campaignDailyBudget, equalsFilter, normalizeReportRows } from "../utils/v1.js";
@@ -70,7 +70,7 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
                 limit: 1,
                 sortBy: "localSpend",
                 sortOrder: "DESCENDING",
-                filters: [equalsFilter("campaignId", campaignId)],
+                filters: [equalsFilter("id", campaignId)],
               })
             ),
           ]);
@@ -98,7 +98,7 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
         // Ad groups
         sections.push(`\n=== AD GROUPS (${adGroups.length}) ===`);
         for (const ag of adGroups) {
-          sections.push(`• ${ag.name} (ID: ${ag.id}) — ${ag.displayStatus} — Default Bid: ${formatMoney(adGroupBid(ag))}`);
+          sections.push(`• ${ag.name} (ID: ${ag.id}) — ${formatEntityStatus(ag)} — Default Bid: ${formatMoney(adGroupBid(ag))}`);
         }
 
         // Top keywords
@@ -202,7 +202,7 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
           return {
             campaign: campaign.name,
             campaignId: campaign.id,
-            status: campaign.displayStatus,
+            status: formatEntityStatus(campaign),
             totalBudget: formatMoney(campaign.budgetAmount),
             dailyBudget: formatMoney(dailyMoney),
             totalSpend: totalSpend.toFixed(2),

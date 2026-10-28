@@ -24,6 +24,35 @@ export function formatMetrics(m: MetricData): string {
   return lines.join("\n");
 }
 
+export function formatEntityStatus(entity: {
+  status?: string | null;
+  displayStatus?: string | null;
+  systemStatus?: string | null;
+  servingStatus?: string | null;
+}): string {
+  const extra = entity as typeof entity & {
+    servingStateReasons?: unknown;
+    systemStatusReasons?: unknown;
+  };
+  const parts: string[] = [];
+  if (entity.status) parts.push(`Status: ${entity.status}`);
+  if (entity.displayStatus) parts.push(`Display: ${entity.displayStatus}`);
+  if (entity.systemStatus) parts.push(`System: ${entity.systemStatus}`);
+  if (!parts.length && entity.servingStatus) parts.push(`Serving: ${entity.servingStatus}`);
+  const reasons = formatReasonList(extra.servingStateReasons ?? extra.systemStatusReasons);
+  if (reasons) parts.push(`Reasons: ${reasons}`);
+  return parts.join(" | ") || "Status: N/A";
+}
+
+function formatReasonList(reasons: unknown): string | undefined {
+  if (Array.isArray(reasons)) {
+    const text = reasons.map((reason) => String(reason)).filter(Boolean).join(", ");
+    return text || undefined;
+  }
+  if (typeof reasons === "string" && reasons.trim()) return reasons;
+  return undefined;
+}
+
 export function formatCampaignSummary(c: Campaign): string {
   const v1 = c as Campaign & {
     dailyBudget?: { value?: { amount: string; currency: string } };
@@ -34,13 +63,12 @@ export function formatCampaignSummary(c: Campaign): string {
   const daily = c.dailyBudgetAmount ?? v1.dailyBudget?.value ?? null;
   const countries = c.countriesOrRegions ?? v1.targeting?.countryOrRegion?.include;
   const adamId = c.adamId ?? v1.promotedObjectId;
-  const status = c.displayStatus ?? v1.systemStatus ?? c.status;
   const budgetLine = c.budgetAmount
     ? `Budget: ${formatMoney(c.budgetAmount)} (Daily: ${formatMoney(daily)})`
     : `Daily budget: ${formatMoney(daily)} (lifetime budget is not used on Platform API v1)`;
   return [
     `Campaign: ${c.name} (ID: ${c.id})`,
-    `Status: ${status}`,
+    formatEntityStatus(v1),
     budgetLine,
     `Countries: ${countries?.join(", ") ?? "N/A"}`,
     `App Adam ID: ${adamId ?? "N/A"}`,
@@ -50,7 +78,7 @@ export function formatCampaignSummary(c: Campaign): string {
 export function formatAdSummary(ad: Ad): string {
   return [
     `Ad: ${ad.name} (ID: ${ad.id})`,
-    `Status: ${ad.servingStatus}`,
+    formatEntityStatus(ad),
     `Creative ID: ${ad.creativeId}`,
     `Campaign ID: ${ad.campaignId}, Ad Group ID: ${ad.adGroupId}`,
     ad.rejectionReasons?.length

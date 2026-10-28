@@ -5,7 +5,7 @@ import type { ApiListResponse, ApiResponse, Ad } from "../types/apple-ads.js";
 import type { ReportResponse } from "../types/reporting.js";
 import { formatAdSummary, formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
-import { validateDate } from "../utils/validators.js";
+import { validateDate, validateMonthlyRange } from "../utils/validators.js";
 import { buildV1Query, buildV1Report, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 export function registerAdTools(server: McpServer, client: AppleAdsClient) {
@@ -223,7 +223,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
       campaignId: z.number().describe("The campaign ID"),
       startDate: z.string().describe("Start date (YYYY-MM-DD)"),
       endDate: z.string().describe("End date (YYYY-MM-DD)"),
-      granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY). Platform API v1 does not support HOURLY for ad reports."),
+      granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY). HOURLY is rejected. MONTHLY requires a whole-month range."),
       limit: z.number().optional().describe("Max rows (default 100)"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -234,6 +234,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
       if (granularity === "HOURLY") {
         return { content: [{ type: "text", text: "Platform API v1 ad reports do not support HOURLY granularity. Use DAILY, WEEKLY, or MONTHLY." }] };
       }
+      validateMonthlyRange(startDate, endDate, granularity);
 
       const resp = await client.post<ReportResponse<{ adId: number; adName: string; name?: string; id?: number }>>(
         "/reports/apps/ads/query",

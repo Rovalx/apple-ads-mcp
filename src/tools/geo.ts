@@ -5,7 +5,7 @@ import type { AppleAdsClient } from "../client/api-client.js";
 import type { ReportResponse } from "../types/reporting.js";
 import { formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
-import { validateDate } from "../utils/validators.js";
+import { validateDate, validateMonthlyRange } from "../utils/validators.js";
 import { buildV1Report, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 export function registerGeoTools(server: McpServer, client: AppleAdsClient) {
@@ -16,13 +16,14 @@ export function registerGeoTools(server: McpServer, client: AppleAdsClient) {
       campaignId: z.number().describe("The campaign ID"),
       startDate: z.string().describe("Start date (YYYY-MM-DD)"),
       endDate: z.string().describe("End date (YYYY-MM-DD)"),
-      granularity: z.enum(["DAILY", "WEEKLY", "MONTHLY"]).optional(),
+      granularity: z.enum(["DAILY", "WEEKLY", "MONTHLY"]).optional().describe("MONTHLY requires a whole-month range (start on the 1st, end on the last day of a month)."),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ campaignId, startDate, endDate, granularity }) => {
     try {
       validateDate(startDate, "startDate");
       validateDate(endDate, "endDate");
+      validateMonthlyRange(startDate, endDate, granularity);
 
       const resp = await client.post<ReportResponse<{ countryOrRegion: string; campaignId: number }>>(
         "/reports/apps/campaigns/query",
@@ -33,7 +34,7 @@ export function registerGeoTools(server: McpServer, client: AppleAdsClient) {
           limit: 100,
           sortBy: "localSpend",
           sortOrder: "DESCENDING",
-          filters: [equalsFilter("campaignId", campaignId)],
+          filters: [equalsFilter("id", campaignId)],
           groupBy: ["countryOrRegion"],
         })
       );

@@ -368,6 +368,14 @@ These v5 calls have no v1 equivalent and return that explanation instead of call
 
 `list_organizations` and `switch_organization` still exist. Listing shows ad accounts and their parent org ids. Switching an org does not select the ad account.
 
+Selected ad account is stored in `~/.apple-ads-mcp/state-v1.json`. Version 1.x keeps using `~/.apple-ads-mcp/state.json`, so the two installs do not overwrite each other.
+
+`get_keyword_suggestions` does not ask Apple to sort (field `popularity` is not queryable). It sorts the returned page locally. The default page size is 500. Omit `terms` for absolute scores; seed terms make popularity relative and can mix languages.
+
+`get_search_term_popularity` accepts optional `genre` (`GAMES`, `PRODUCTIVITY`) and optional `searchTerms` (filter `searchTerm` `IN`). Apple returns roughly the top 500 terms per genre.
+
+`get_campaign_report` and `get_geo_performance` filter campaign reports on field `id`. `MONTHLY` granularity must start on the 1st and end on the last day of a month. Campaign-level `list_negative_keywords` sends `campaignId EQUALS` and `adGroupId IS_NULL`.
+
 Keyword popularity for an app (not the campaign search-term report):
 
 ```text

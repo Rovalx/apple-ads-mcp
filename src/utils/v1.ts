@@ -10,7 +10,7 @@ export interface ToolCondition {
 export interface V1Filter {
   field: string;
   operator: string;
-  value: unknown;
+  value?: unknown;
 }
 
 export interface V1Query {

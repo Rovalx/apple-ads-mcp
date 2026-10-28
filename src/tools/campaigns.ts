@@ -5,7 +5,7 @@ import type { ApiListResponse, ApiResponse, Campaign } from "../types/apple-ads.
 import type { ReportResponse } from "../types/reporting.js";
 import { formatCampaignSummary, formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
-import { validateDate } from "../utils/validators.js";
+import { validateDate, validateMonthlyRange } from "../utils/validators.js";
 import { toISO8601 } from "../utils/date-helpers.js";
 import { buildV1Query, buildV1Report, dailyBudget, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
@@ -216,12 +216,12 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
     "get_campaign_report",
     {
       title: "Campaign Performance Report",
-      description: "Get performance metrics for one or all campaigns over a date range. Returns impressions, taps, installs, spend, CPA, CPT, TTR, and conversion rates. Use for high-level performance analysis. For deeper analysis, drill down with get_adgroup_report or get_keyword_report.",
+      description: "Get performance metrics for one or all campaigns over a date range. Returns impressions, taps, installs, spend, CPA, CPT, TTR, and conversion rates. Use for high-level performance analysis. For deeper analysis, drill down with get_adgroup_report or get_keyword_report. A campaignId filter is sent as field id on POST /v1/reports/apps/campaigns/query (that endpoint rejects campaignId). MONTHLY requires the range to start on the 1st and end on the last day of a month.",
       inputSchema: {
-        campaignId: z.number().optional().describe("Filter to a specific campaign (omit for all campaigns)"),
+        campaignId: z.number().optional().describe("Filter to a specific campaign (omit for all campaigns). Sent as filter field id."),
         startDate: z.string().describe("Start date (YYYY-MM-DD)"),
         endDate: z.string().describe("End date (YYYY-MM-DD)"),
-        granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity for trend data (default DAILY)"),
+        granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY). MONTHLY requires startDate YYYY-MM-01 and endDate on the last day of a month."),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
@@ -229,6 +229,7 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
       try {
         validateDate(startDate, "startDate");
         validateDate(endDate, "endDate");
+        validateMonthlyRange(startDate, endDate, granularity);
 
         const reportReq = buildV1Report({
           startDate,
@@ -237,7 +238,7 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
           limit: 1000,
           sortBy: "localSpend",
           sortOrder: "DESCENDING",
-          filters: campaignId ? [equalsFilter("campaignId", campaignId)] : undefined,
+          filters: campaignId ? [equalsFilter("id", campaignId)] : undefined,
           includeGrandTotal: true,
         });
 
