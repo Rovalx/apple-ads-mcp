@@ -1,6 +1,12 @@
 import type { MetricData } from "../types/reporting.js";
 import type { Ad, BudgetOrder, Campaign, Creative, Money } from "../types/apple-ads.js";
 
+/** Page length is not the account total. Apple only returns totalCount when fetchTotalCount is set. */
+export function formatShownTotal(shown: number, total: number | null | undefined): string {
+  if (total == null) return `shown: ${shown}`;
+  return `shown: ${shown}, total: ${total}`;
+}
+
 export function formatMoney(m: Money | { amount: string; currency: string } | null | undefined): string {
   if (!m || m.amount == null || m.currency == null) return "N/A";
   const amount = parseFloat(m.amount);

@@ -103,7 +103,7 @@ export function registerSuggestionTools(server: McpServer, client: AppleAdsClien
             granularity: granularity ?? "WEEKLY_SUN_SAT",
           },
           sorting: [{ field: "rankInGenre", order: "ASC" as const }],
-          pagination: { offset: 0, pageSize: limit ?? 500 },
+          pagination: { offset: 0, pageSize: limit ?? 500, fetchTotalCount: true },
         };
         const resp = await client.post<{ data: unknown }>("/insights/apps/search-term-popularity/query", body);
         const rows = asList<PopularityRow>(resp.data);

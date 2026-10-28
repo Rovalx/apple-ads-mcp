@@ -16,7 +16,7 @@ export interface V1Filter {
 export interface V1Query {
   filters?: V1Filter[];
   sorting?: Array<{ field: string; order: "ASC" | "DESC" }>;
-  pagination?: { offset: number; pageSize: number };
+  pagination?: { offset: number; pageSize: number; fetchTotalCount?: boolean };
 }
 
 const OPERATOR_ALIASES: Record<string, string> = {
@@ -81,6 +81,7 @@ export function buildV1Query(opts: {
   query.pagination = {
     offset: opts.offset ?? 0,
     pageSize: opts.limit ?? 50,
+    fetchTotalCount: true,
   };
   return query;
 }

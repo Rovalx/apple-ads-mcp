@@ -3,7 +3,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiListResponse, ApiResponse, Campaign } from "../types/apple-ads.js";
 import type { ReportResponse } from "../types/reporting.js";
-import { formatCampaignSummary, formatMetrics } from "../utils/formatters.js";
+import { formatCampaignSummary, formatMetrics, formatShownTotal } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate, validateMonthlyRange } from "../utils/validators.js";
 import { toISO8601 } from "../utils/date-helpers.js";
@@ -37,7 +37,7 @@ export function registerCampaignTools(server: McpServer, client: AppleAdsClient)
 
         const summaries = resp.data.map(formatCampaignSummary);
         const text = [
-          `Found ${resp.data.length} campaigns (total: ${resp.pagination?.totalResults ?? resp.data.length}):`,
+          `Found ${resp.data.length} campaigns (${formatShownTotal(resp.data.length, resp.pagination?.totalResults)}):`,
           "",
           ...summaries.map((s, i) => `--- Campaign ${i + 1} ---\n${s}`),
         ].join("\n");

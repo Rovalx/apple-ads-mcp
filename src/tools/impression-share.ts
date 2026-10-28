@@ -36,7 +36,7 @@ export function registerImpressionShareTools(server: McpServer, client: AppleAds
           end: endTime,
           granularity: granularity === "WEEKLY" ? "WEEKLY_SUN_SAT" : "DAILY",
         },
-        pagination: { offset: 0, pageSize: 100 },
+        pagination: { offset: 0, pageSize: 100, fetchTotalCount: true },
       };
       const resp = await client.post<{ data: unknown }>("/insights/apps/impression-share/query", body);
       const rows = asList<unknown>(resp.data);
