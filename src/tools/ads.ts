@@ -2,11 +2,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiListResponse, ApiResponse, Ad } from "../types/apple-ads.js";
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
-import { buildSelector } from "../utils/selectors.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { formatAdSummary, formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { buildV1Query, buildV1Report, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 export function registerAdTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool("list_ads", {
@@ -28,20 +28,14 @@ export function registerAdTools(server: McpServer, client: AppleAdsClient) {
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ campaignId, adGroupId, limit, offset, sortBy, sortOrder, conditions }) => {
     try {
-      let resp: ApiListResponse<Ad>;
-
-      if (!campaignId) {
-        const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-        resp = await client.post<ApiListResponse<Ad>>("/ads/find", selector);
-      } else if (conditions?.length || sortBy || !adGroupId) {
-        const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-        resp = await client.post<ApiListResponse<Ad>>(`/campaigns/${campaignId}/ads/find`, selector);
-      } else {
-        resp = await client.get<ApiListResponse<Ad>>(
-          `/campaigns/${campaignId}/adgroups/${adGroupId}/ads`,
-          { limit: String(limit ?? 50) }
-        );
-      }
+      const filters = [
+        ...(campaignId ? [equalsFilter("campaignId", campaignId)] : []),
+        ...(adGroupId ? [equalsFilter("adGroupId", adGroupId)] : []),
+      ];
+      const resp = await client.post<ApiListResponse<Ad>>(
+        "/ads/query",
+        buildV1Query({ limit: limit ?? 50, offset, sortBy, sortOrder, conditions, filters })
+      );
 
       const summaries = resp.data.map(formatAdSummary);
       const scope = !campaignId ? "all campaigns" : adGroupId ? `ad group ${adGroupId}` : `campaign ${campaignId}`;
@@ -77,16 +71,17 @@ Each ad group can have multiple ads with different creatives. Apple will automat
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   }, async ({ campaignId, adGroupId, name, creativeId, status }) => {
     try {
+      const adAccountId = client.getAdAccountId();
       const body: Record<string, unknown> = {
+        campaignId,
+        adGroupId,
         creativeId,
         status: status ?? "ENABLED",
+        ...(adAccountId ? { adAccountId: Number(adAccountId) } : {}),
       };
       if (name) body.name = name;
 
-      const resp = await client.post<ApiResponse<Ad>>(
-        `/campaigns/${campaignId}/adgroups/${adGroupId}/ads`,
-        body
-      );
+      const resp = await client.post<ApiResponse<Ad>>("/ads", body);
 
       return {
         content: [
@@ -120,10 +115,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
         return { content: [{ type: "text", text: "No changes specified." }] };
       }
 
-      const resp = await client.put<ApiResponse<Ad>>(
-        `/campaigns/${campaignId}/adgroups/${adGroupId}/ads/${adId}`,
-        body
-      );
+      const resp = await client.put<ApiResponse<Ad>>(`/ads/${adId}`, body);
 
       return {
         content: [
@@ -147,9 +139,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   }, async ({ campaignId, adGroupId, adId }) => {
     try {
-      await client.delete<unknown>(
-        `/campaigns/${campaignId}/adgroups/${adGroupId}/ads/${adId}`
-      );
+      await client.delete<unknown>(`/ads/${adId}`);
       return {
         content: [{ type: "text", text: `Deleted ad ${adId} from ad group ${adGroupId}.` }],
       };
@@ -169,9 +159,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   }, async ({ campaignId, adGroupId, adId }) => {
     try {
-      const resp = await client.get<ApiResponse<Ad>>(
-        `/campaigns/${campaignId}/adgroups/${adGroupId}/ads/${adId}`
-      );
+      const resp = await client.get<ApiResponse<Ad>>(`/ads/${adId}`);
       const summary = formatAdSummary(resp.data);
       return {
         content: [
@@ -203,7 +191,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
   }, async ({ productPageReasonId, limit, offset, sortBy, sortOrder, conditions }) => {
     try {
       if (productPageReasonId) {
-        const resp = await client.get<ApiResponse<Record<string, unknown>>>(`/product-page-reasons/${productPageReasonId}`);
+        const resp = await client.get<ApiResponse<Record<string, unknown>>>(`/rejection-reasons/apps/${productPageReasonId}`);
         return {
           content: [
             { type: "text", text: `Ad rejection reason ${productPageReasonId}:` },
@@ -212,8 +200,10 @@ Each ad group can have multiple ads with different creatives. Apple will automat
         };
       }
 
-      const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-      const resp = await client.post<ApiListResponse<Record<string, unknown>>>("/product-page-reasons/find", selector);
+      const resp = await client.post<ApiListResponse<Record<string, unknown>>>(
+        "/rejection-reasons/apps/query",
+        buildV1Query({ limit: limit ?? 1000, offset, sortBy, sortOrder, conditions })
+      );
 
       return {
         content: [
@@ -233,7 +223,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
       campaignId: z.number().describe("The campaign ID"),
       startDate: z.string().describe("Start date (YYYY-MM-DD)"),
       endDate: z.string().describe("End date (YYYY-MM-DD)"),
-      granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY)"),
+      granularity: z.enum(["HOURLY", "DAILY", "WEEKLY", "MONTHLY"]).optional().describe("Time granularity (default DAILY). Platform API v1 does not support HOURLY for ad reports."),
       limit: z.number().optional().describe("Max rows (default 100)"),
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -241,20 +231,23 @@ Each ad group can have multiple ads with different creatives. Apple will automat
     try {
       validateDate(startDate, "startDate");
       validateDate(endDate, "endDate");
+      if (granularity === "HOURLY") {
+        return { content: [{ type: "text", text: "Platform API v1 ad reports do not support HOURLY granularity. Use DAILY, WEEKLY, or MONTHLY." }] };
+      }
 
-      const reportReq: ReportingRequest = {
-        startTime: startDate,
-        endTime: endDate,
-        granularity: granularity ?? "DAILY",
-        selector: buildSelector({ limit: limit ?? 100, sortBy: "localSpend", sortOrder: "DESCENDING" }),
-        returnRowTotals: true,
-      };
-
-      const resp = await client.post<ReportResponse<{ adId: number; adName: string }>>(
-        `/reports/campaigns/${campaignId}/ads`,
-        reportReq
+      const resp = await client.post<ReportResponse<{ adId: number; adName: string; name?: string; id?: number }>>(
+        "/reports/apps/ads/query",
+        buildV1Report({
+          startDate,
+          endDate,
+          granularity: granularity ?? "DAILY",
+          limit: limit ?? 100,
+          sortBy: "localSpend",
+          sortOrder: "DESCENDING",
+          filters: [equalsFilter("campaignId", campaignId)],
+        })
       );
-      const rows = resp.data.reportingDataResponse.row;
+      const rows = normalizeReportRows<{ adId: number; adName: string; name?: string; id?: number }>(resp.data);
 
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No ad data found for the specified date range." }] };
@@ -262,7 +255,7 @@ Each ad group can have multiple ads with different creatives. Apple will automat
 
       const summaries = rows.map((row) => {
         return [
-          `Ad: ${row.metadata.adName} (ID: ${row.metadata.adId})`,
+          `Ad: ${row.metadata.adName ?? row.metadata.name} (ID: ${row.metadata.adId ?? row.metadata.id})`,
           formatMetrics(row.total),
         ].join("\n");
       });

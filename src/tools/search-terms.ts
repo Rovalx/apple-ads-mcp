@@ -1,11 +1,11 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
-import { buildSelector } from "../utils/selectors.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { buildV1Report, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 interface SearchTermMetadata {
   searchTermText: string;
@@ -38,23 +38,21 @@ export function registerSearchTermTools(server: McpServer, client: AppleAdsClien
         validateDate(startDate, "startDate");
         validateDate(endDate, "endDate");
 
-        const reportReq: ReportingRequest = {
-          startTime: startDate,
-          endTime: endDate,
-          selector: buildSelector({
+        const filters = [equalsFilter("campaignId", campaignId)];
+        if (adGroupId) filters.push(equalsFilter("adGroupId", adGroupId));
+        const resp = await client.post<ReportResponse<SearchTermMetadata>>(
+          "/reports/apps/searchterms/query",
+          buildV1Report({
+            startDate,
+            endDate,
             limit: limit ?? 100,
             sortBy: sortBy ?? "localSpend",
             sortOrder: "DESCENDING",
-          }),
-          returnRowTotals: true,
-        };
-
-        const path = adGroupId
-          ? `/reports/campaigns/${campaignId}/adgroups/${adGroupId}/searchterms`
-          : `/reports/campaigns/${campaignId}/searchterms`;
-
-        const resp = await client.post<ReportResponse<SearchTermMetadata>>(path, reportReq);
-        const rows = resp.data.reportingDataResponse.row;
+            filters,
+            timeZone: "ORTZ",
+          })
+        );
+        const rows = normalizeReportRows<SearchTermMetadata>(resp.data);
 
         if (rows.length === 0) {
           return { content: [{ type: "text", text: "No search term data found for the specified date range." }] };

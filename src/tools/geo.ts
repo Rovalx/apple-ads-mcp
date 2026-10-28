@@ -2,11 +2,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
-import { buildSelector } from "../utils/selectors.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { buildV1Report, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 export function registerGeoTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool("get_geo_performance", {
@@ -24,26 +24,21 @@ export function registerGeoTools(server: McpServer, client: AppleAdsClient) {
       validateDate(startDate, "startDate");
       validateDate(endDate, "endDate");
 
-      const reportReq: ReportingRequest = {
-        startTime: startDate,
-        endTime: endDate,
-        granularity: granularity ?? "DAILY",
-        groupBy: ["countryOrRegion"],
-        selector: buildSelector({
+      const resp = await client.post<ReportResponse<{ countryOrRegion: string; campaignId: number }>>(
+        "/reports/apps/campaigns/query",
+        buildV1Report({
+          startDate,
+          endDate,
+          granularity: granularity ?? "DAILY",
           limit: 100,
           sortBy: "localSpend",
           sortOrder: "DESCENDING",
-          conditions: [{ field: "campaignId", operator: "EQUALS", values: [String(campaignId)] }],
-        }),
-        returnRowTotals: true,
-      };
-
-      const resp = await client.post<ReportResponse<{ countryOrRegion: string; campaignId: number }>>(
-        "/reports/campaigns",
-        reportReq
+          filters: [equalsFilter("campaignId", campaignId)],
+          groupBy: ["countryOrRegion"],
+        })
       );
 
-      const rows = resp.data.reportingDataResponse.row;
+      const rows = normalizeReportRows<{ countryOrRegion: string; campaignId: number }>(resp.data);
       if (rows.length === 0) {
         return { content: [{ type: "text", text: "No geo data found for the specified date range." }] };
       }

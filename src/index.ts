@@ -19,6 +19,7 @@ import { registerAdTools } from "./tools/ads.js";
 import { registerCreativeTools } from "./tools/creatives.js";
 import { registerOrganizationTools } from "./tools/organizations.js";
 import { registerImpressionShareTools } from "./tools/impression-share.js";
+import { registerSuggestionTools } from "./tools/suggestions.js";
 import { registerResources } from "./resources.js";
 import { registerPrompts } from "./prompts.js";
 
@@ -50,6 +51,7 @@ async function main() {
   registerAdTools(server, client);
   registerCreativeTools(server, client);
   registerImpressionShareTools(server, client);
+  registerSuggestionTools(server, client);
 
   // Start STDIO transport
   const transport = new StdioServerTransport();

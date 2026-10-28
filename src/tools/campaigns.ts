@@ -1,19 +1,20 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
-import type { ApiListResponse, ApiResponse, Campaign, CampaignCreate, CampaignUpdate, Money } from "../types/apple-ads.js";
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
-import { buildSelector } from "../utils/selectors.js";
+import type { ApiListResponse, ApiResponse, Campaign } from "../types/apple-ads.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { formatCampaignSummary, formatMetrics } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { toISO8601 } from "../utils/date-helpers.js";
+import { buildV1Query, buildV1Report, dailyBudget, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 export function registerCampaignTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool(
     "list_campaigns",
     {
       title: "List / Find Campaigns",
-      description: "List or search campaigns in the account. Returns campaign ID, name, status, budgets, countries, and supply sources. Use without parameters for a quick overview. Add conditions to filter (e.g., status=ENABLED) or sortBy to rank results. This is typically the first tool to call when exploring an account.",
+      description: "List or search campaigns in the selected ad account (POST /v1/campaigns/query). Returns campaign ID, name, status, daily budget, countries, and supply placements. Use without parameters for a quick overview. Add conditions to filter (e.g., status=ENABLED) or sortBy to rank results. Select an ad account with list_ad_accounts and switch_ad_account first.",
       inputSchema: {
         limit: z.number().optional().describe("Max campaigns to return (default 50)"),
         offset: z.number().optional().describe("Pagination offset"),
@@ -29,17 +30,10 @@ export function registerCampaignTools(server: McpServer, client: AppleAdsClient)
     },
     async ({ limit, offset, sortBy, sortOrder, conditions }) => {
       try {
-        let resp: ApiListResponse<Campaign>;
-
-        if (conditions?.length || sortBy) {
-          const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-          resp = await client.post<ApiListResponse<Campaign>>("/campaigns/find", selector);
-        } else {
-          resp = await client.get<ApiListResponse<Campaign>>("/campaigns", {
-            limit: String(limit ?? 50),
-            offset: String(offset ?? 0),
-          });
-        }
+        const resp = await client.post<ApiListResponse<Campaign>>(
+          "/campaigns/query",
+          buildV1Query({ limit: limit ?? 50, offset, sortBy, sortOrder, conditions })
+        );
 
         const summaries = resp.data.map(formatCampaignSummary);
         const text = [
@@ -95,13 +89,13 @@ export function registerCampaignTools(server: McpServer, client: AppleAdsClient)
 
 Defaults applied: status=ENABLED, currency=USD, supplySource=APPSTORE_SEARCH_RESULTS. adChannelType and billingEvent are auto-set based on supply source (SEARCH/TAPS for search results, DISPLAY/IMPRESSIONS for search tab).
 
-Lifetime budget (budgetAmount) is optional. Omit it — or pass "", "0", or "none" — to create with only dailyBudgetAmount. Many organizations, including pay-as-you-go, reject a lifetime budget with error LIFETIME_BUDGET_NOT_SUPPORTED.
+Platform API v1 deprecates lifetime budget. budgetAmount is accepted for compatibility and is never sent. Only dailyBudget is sent as dailyBudgetAmount. The app adamId is sent as promotedObjectId with promotedObjectType APPSTORE_APP.
 
 Side effects: Campaign starts spending immediately if status=ENABLED and budget > 0. Use status=PAUSED to set up everything before going live.`,
       inputSchema: {
         name: z.string().describe("Campaign name"),
         adamId: z.number().describe("App Adam ID (use search_apps to find it)"),
-        budgetAmount: z.string().optional().describe("Total/lifetime budget (e.g., '5000.00'). Omit, or pass '', '0', or 'none', to send only the daily budget. Required only for orgs that support a lifetime budget; otherwise Apple returns LIFETIME_BUDGET_NOT_SUPPORTED."),
+        budgetAmount: z.string().optional().describe("Ignored. Platform API v1 deprecated lifetime budget (v5 LIFETIME_BUDGET_NOT_SUPPORTED). Only dailyBudgetAmount is sent."),
         dailyBudgetAmount: z.string().describe("Daily budget cap (e.g., '100.00')"),
         countriesOrRegions: z.array(z.string()).describe("Country/region codes (e.g., ['US', 'GB']). Use the apple-ads://countries resource for valid codes"),
         currency: z.string().optional().describe("Currency code (default 'USD')"),
@@ -114,25 +108,34 @@ Side effects: Campaign starts spending immediately if status=ENABLED and budget 
       try {
         const cur = currency ?? "USD";
         const resolvedSources = supplySources ?? ["APPSTORE_SEARCH_RESULTS"];
-        const lifetimeBudget = resolveLifetimeBudget(budgetAmount);
-        const body: CampaignCreate = {
+        const searchTab = resolvedSources.includes("APPSTORE_SEARCH_TAB");
+        const adAccountId = client.getAdAccountId();
+        const body: Record<string, unknown> = {
           name,
-          adamId,
-          dailyBudgetAmount: { amount: dailyBudgetAmount, currency: cur },
-          countriesOrRegions,
-          supplySources: resolvedSources,
-          adChannelType: resolvedSources.includes("APPSTORE_SEARCH_TAB") ? "DISPLAY" : "SEARCH",
+          ...(adAccountId ? { adAccountId: Number(adAccountId) } : {}),
           status: status ?? "ENABLED",
-          billingEvent: resolvedSources.includes("APPSTORE_SEARCH_TAB") ? "IMPRESSIONS" : "TAPS",
+          promotedObjectType: "APPSTORE_APP",
+          promotedObjectId: String(adamId),
+          startTime: toISO8601(new Date().toISOString().split("T")[0]!),
+          billingEvent: searchTab ? "IMPRESSIONS" : "TAPS",
+          bidStrategy: {
+            bidStrategyType: "MANUAL_CPT",
+            bidStrategyGoal: searchTab ? "IMPRESSION" : "TAP",
+          },
+          dailyBudget: dailyBudget(dailyBudgetAmount, cur),
+          targeting: {
+            supplyPlacement: { include: resolvedSources },
+            countryOrRegion: { include: countriesOrRegions },
+          },
         };
-        if (lifetimeBudget) {
-          body.budgetAmount = { amount: lifetimeBudget, currency: cur };
-        }
+        const lifetimeNote = budgetAmount?.trim()
+          ? " Lifetime budget was not sent; Platform API v1 deprecated it."
+          : "";
 
         const resp = await client.post<ApiResponse<Campaign>>("/campaigns", body);
         return {
           content: [
-            { type: "text", text: `Created campaign "${resp.data.name}" (ID: ${resp.data.id}). Next steps: create_ad_group → add_targeting_keywords` },
+            { type: "text", text: `Created campaign "${resp.data.name}" (ID: ${resp.data.id}). Next steps: create_ad_group → add_targeting_keywords.${lifetimeNote}` },
             { type: "text", text: JSON.stringify(resp.data, null, 2) },
           ],
         };
@@ -153,7 +156,7 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
         campaignId: z.number().describe("The campaign ID"),
         name: z.string().optional().describe("New campaign name"),
         status: z.enum(["ENABLED", "PAUSED"]).optional().describe("New status — PAUSED stops all delivery immediately"),
-        budgetAmount: z.string().optional().describe("New total/lifetime budget (cannot be added after creation if not set initially). '', '0', and 'none' are ignored and not sent."),
+        budgetAmount: z.string().optional().describe("Ignored. Platform API v1 has no lifetime budget field."),
         dailyBudgetAmount: z.string().optional().describe("New daily budget cap (e.g., '1.50')"),
         countriesOrRegions: z.array(z.string()).optional().describe("New country/region codes — WARNING: clears geo targeting"),
         currency: z.string().optional().describe("Currency code (default 'USD')"),
@@ -163,23 +166,18 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
     async ({ campaignId, name, status, budgetAmount, dailyBudgetAmount, countriesOrRegions, currency }) => {
       try {
         const cur = currency ?? "USD";
-        const body: CampaignUpdate = {};
+        const body: Record<string, unknown> = {};
         if (name) body.name = name;
         if (status) body.status = status;
-        const lifetimeBudget = resolveLifetimeBudget(budgetAmount);
-        if (lifetimeBudget) body.budgetAmount = { amount: lifetimeBudget, currency: cur };
-        if (dailyBudgetAmount) body.dailyBudgetAmount = { amount: dailyBudgetAmount, currency: cur };
-        if (countriesOrRegions) body.countriesOrRegions = countriesOrRegions;
+        if (dailyBudgetAmount) body.dailyBudget = dailyBudget(dailyBudgetAmount, cur);
+        if (countriesOrRegions) body.targeting = { countryOrRegion: { include: countriesOrRegions } };
 
         if (Object.keys(body).length === 0) {
-          return { content: [{ type: "text", text: "No changes specified." }] };
+          const ignored = budgetAmount?.trim() ? " Lifetime budget was not sent; Platform API v1 deprecated it." : "";
+          return { content: [{ type: "text", text: `No changes specified.${ignored}` }] };
         }
 
-        const clearGeo = !!countriesOrRegions;
-        const resp = await client.put<ApiResponse<Campaign>>(`/campaigns/${campaignId}`, {
-          campaign: body,
-          clearGeoTargetingOnCountryOrRegionChange: clearGeo,
-        });
+        const resp = await client.put<ApiResponse<Campaign>>(`/campaigns/${campaignId}`, body);
         return {
           content: [
             { type: "text", text: `Updated campaign "${resp.data.name}" (ID: ${resp.data.id})` },
@@ -232,26 +230,22 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
         validateDate(startDate, "startDate");
         validateDate(endDate, "endDate");
 
-        const reportReq: ReportingRequest = {
-          startTime: startDate,
-          endTime: endDate,
+        const reportReq = buildV1Report({
+          startDate,
+          endDate,
           granularity: granularity ?? "DAILY",
-          selector: buildSelector({
-            limit: 1000,
-            sortBy: "localSpend",
-            sortOrder: "DESCENDING",
-            conditions: campaignId
-              ? [{ field: "campaignId", operator: "EQUALS", values: [String(campaignId)] }]
-              : undefined,
-          }),
-          returnRowTotals: true,
-          returnGrandTotals: true,
-        };
+          limit: 1000,
+          sortBy: "localSpend",
+          sortOrder: "DESCENDING",
+          filters: campaignId ? [equalsFilter("campaignId", campaignId)] : undefined,
+          includeGrandTotal: true,
+        });
 
-        const path = "/reports/campaigns";
-
-        const resp = await client.post<ReportResponse<{ campaignId: number; campaignName: string }>>(path, reportReq);
-        const rows = resp.data.reportingDataResponse.row;
+        const resp = await client.post<ReportResponse<{ campaignId: number; campaignName: string }>>(
+          "/reports/apps/campaigns/query",
+          reportReq
+        );
+        const rows = normalizeReportRows<{ campaignId: number; campaignName: string }>(resp.data);
 
         if (rows.length === 0) {
           return { content: [{ type: "text", text: "No data found for the specified date range." }] };
@@ -282,20 +276,4 @@ Important: changing countriesOrRegions will clear existing geo targeting (ad-gro
       }
     }
   );
-}
-
-/**
- * Amount to send as budgetAmount, or undefined when the field must be omitted.
- * Apple returns LIFETIME_BUDGET_NOT_SUPPORTED if a lifetime budget is present on
- * orgs that only allow a daily budget (common for pay-as-you-go). Blank, "none",
- * and numeric zero ("0", "0.00") mean "daily budget only".
- */
-function resolveLifetimeBudget(budgetAmount: string | undefined): string | undefined {
-  if (budgetAmount == null) return undefined;
-  const trimmed = budgetAmount.trim();
-  if (trimmed.length === 0) return undefined;
-  if (trimmed.toLowerCase() === "none") return undefined;
-  const numeric = Number(trimmed);
-  if (Number.isFinite(numeric) && numeric === 0) return undefined;
-  return trimmed;
 }

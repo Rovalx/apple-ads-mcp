@@ -7,6 +7,7 @@ const STATE_FILE = join(STATE_DIR, "state.json");
 
 interface State {
   orgId?: string;
+  adAccountId?: string;
 }
 
 export function loadState(): State {

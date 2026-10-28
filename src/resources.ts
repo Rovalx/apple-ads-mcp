@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "./client/api-client.js";
-import type { ApiListResponse, CountryOrRegion } from "./types/apple-ads.js";
+const NOT_PORTED = "Apple Ads Platform API v1 does not publish this Campaign Management API v5 resource. Product-page country and device catalogs also have no v1 equivalent.";
 
 const METRICS_GLOSSARY = {
   impressions: {
@@ -101,21 +101,15 @@ export function registerResources(server: McpServer, client: AppleAdsClient) {
       mimeType: "application/json",
     },
     async () => {
-      const resp = await client.get<ApiListResponse<CountryOrRegion>>("/countries-or-regions");
-
-      const text = resp.data
-        .map((cr) => cr.displayName ? `${cr.displayName} (${cr.countryOrRegion})` : cr.countryOrRegion)
-        .join("\n");
-
       return {
         contents: [
           {
             uri: "apple-ads://countries",
             mimeType: "application/json",
             text: JSON.stringify({
-              summary: `${resp.data.length} supported countries/regions`,
-              humanReadable: text,
-              data: resp.data,
+              ported: false,
+              summary: NOT_PORTED,
+              v5Path: "GET /v5/countries-or-regions",
             }, null, 2),
           },
         ],
@@ -132,17 +126,15 @@ export function registerResources(server: McpServer, client: AppleAdsClient) {
       mimeType: "application/json",
     },
     async () => {
-      const resp = await client.get<{ data: Record<string, unknown> }>("/creativeappmappings/devices");
-      const entries = Object.keys(resp.data);
-
       return {
         contents: [
           {
             uri: "apple-ads://device-sizes",
             mimeType: "application/json",
             text: JSON.stringify({
-              summary: `${entries.length} device size(s)`,
-              data: resp.data,
+              ported: false,
+              summary: NOT_PORTED,
+              v5Path: "GET /v5/creativeappmappings/devices",
             }, null, 2),
           },
         ],

@@ -1,13 +1,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
-import type { ApiListResponse, ApiResponse, AdGroup, AdGroupCreate, AdGroupUpdate, Money } from "../types/apple-ads.js";
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
-import { buildSelector } from "../utils/selectors.js";
+import type { ApiListResponse, ApiResponse, AdGroup } from "../types/apple-ads.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { formatMetrics, formatMoney } from "../utils/formatters.js";
 import { toISO8601 } from "../utils/date-helpers.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { adGroupBid, buildV1Query, buildV1Report, equalsFilter, money, normalizeReportRows } from "../utils/v1.js";
 
 export function registerAdGroupTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool(
@@ -31,27 +31,18 @@ export function registerAdGroupTools(server: McpServer, client: AppleAdsClient) 
     },
     async ({ campaignId, limit, offset, sortBy, sortOrder, conditions }) => {
       try {
-        let resp: ApiListResponse<AdGroup>;
-
-        if (!campaignId) {
-          const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-          resp = await client.post<ApiListResponse<AdGroup>>("/adgroups/find", selector);
-        } else if (conditions?.length || sortBy) {
-          const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-          resp = await client.post<ApiListResponse<AdGroup>>(`/campaigns/${campaignId}/adgroups/find`, selector);
-        } else {
-          resp = await client.get<ApiListResponse<AdGroup>>(
-            `/campaigns/${campaignId}/adgroups`,
-            { limit: String(limit ?? 50), offset: String(offset ?? 0) }
-          );
-        }
+        const filters = campaignId ? [equalsFilter("campaignId", campaignId)] : undefined;
+        const resp = await client.post<ApiListResponse<AdGroup>>(
+          "/adgroups/query",
+          buildV1Query({ limit: limit ?? 50, offset, sortBy, sortOrder, conditions, filters })
+        );
 
         const summaries = resp.data.map((ag) =>
           [
             `Ad Group: ${ag.name} (ID: ${ag.id})`,
             ag.campaignId ? `Campaign ID: ${ag.campaignId}` : null,
             `Status: ${ag.displayStatus}`,
-            `Default Bid: ${formatMoney(ag.defaultBidAmount)}`,
+            `Default Bid: ${formatMoney(adGroupBid(ag))}`,
             ag.cpaGoal ? `CPA Goal: ${formatMoney(ag.cpaGoal)}` : null,
             `Search Match: ${ag.automatedKeywordsOptIn ? "on" : "off"}`,
           ]
@@ -84,7 +75,7 @@ export function registerAdGroupTools(server: McpServer, client: AppleAdsClient) 
       title: "Create Ad Group",
       description: `Create a new ad group within a campaign. After creation, add targeting keywords (add_targeting_keywords) to start matching search queries. Optionally create ads with custom creatives (create_ad).
 
-Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. The defaultBidAmount is used for keywords that don't have an individual bid. Set cpaGoal to enable Apple's cost-per-acquisition optimization. Set automatedKeywordsOptIn to turn Search Match on. startTime and endTime are sent as full date-times (YYYY-MM-DDT00:00:00.000).`,
+Defaults: status=ENABLED, pricingModel=CPT, startTime=today, Search Match off unless automatedKeywordsOptIn is set. defaultBidAmount is sent as bidStrategy.bid. cpaGoal is sent as bidStrategy.targetCPA when provided (v5 cpaCap is sunset; prefer not to rely on it). startTime and endTime are sent as YYYY-MM-DDT00:00:00.000. campaignId is in the body, not the path.`,
       inputSchema: {
         campaignId: z.number().describe("The campaign ID"),
         name: z.string().describe("Ad group name"),
@@ -104,18 +95,24 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
         if (endTime) validateDate(endTime, "endTime");
 
         const cur = currency ?? "USD";
-        const body: AdGroupCreate = {
+        const bidStrategy: Record<string, unknown> = {
+          bidStrategyType: "MANUAL_CPT",
+          bidStrategyGoal: "TAP",
+          bid: money(defaultBidAmount, cur),
+        };
+        if (cpaGoal) bidStrategy.targetCPA = money(cpaGoal, cur);
+        const body: Record<string, unknown> = {
+          campaignId,
           name,
-          defaultBidAmount: { amount: defaultBidAmount, currency: cur },
-          pricingModel: "CPC",
+          pricingModel: "CPT",
           status: status ?? "ENABLED",
           startTime: toISO8601(startTime ?? new Date().toISOString().split("T")[0]!),
+          bidStrategy,
         };
-        if (cpaGoal) body.cpaGoal = { amount: cpaGoal, currency: cur };
         if (endTime) body.endTime = toISO8601(endTime);
         if (automatedKeywordsOptIn !== undefined) body.automatedKeywordsOptIn = automatedKeywordsOptIn;
 
-        const resp = await client.post<ApiResponse<AdGroup>>(`/campaigns/${campaignId}/adgroups`, body);
+        const resp = await client.post<ApiResponse<AdGroup>>("/adgroups", body);
         return {
           content: [
             { type: "text", text: `Created ad group "${resp.data.name}" (ID: ${resp.data.id}) in campaign ${campaignId}. Next: add_targeting_keywords` },
@@ -151,11 +148,15 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
         if (endTime) validateDate(endTime, "endTime");
 
         const cur = currency ?? "USD";
-        const body: AdGroupUpdate = {};
+        const body: Record<string, unknown> = {};
         if (name) body.name = name;
         if (status) body.status = status;
-        if (defaultBidAmount) body.defaultBidAmount = { amount: defaultBidAmount, currency: cur };
-        if (cpaGoal) body.cpaGoal = { amount: cpaGoal, currency: cur };
+        if (defaultBidAmount || cpaGoal) {
+          const bidStrategy: Record<string, unknown> = { bidStrategyType: "MANUAL_CPT", bidStrategyGoal: "TAP" };
+          if (defaultBidAmount) bidStrategy.bid = money(defaultBidAmount, cur);
+          if (cpaGoal) bidStrategy.targetCPA = money(cpaGoal, cur);
+          body.bidStrategy = bidStrategy;
+        }
         if (endTime) body.endTime = toISO8601(endTime);
         if (automatedKeywordsOptIn !== undefined) body.automatedKeywordsOptIn = automatedKeywordsOptIn;
 
@@ -163,7 +164,7 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
           return { content: [{ type: "text", text: "No changes specified." }] };
         }
 
-        const resp = await client.put<ApiResponse<AdGroup>>(`/campaigns/${campaignId}/adgroups/${adGroupId}`, body);
+        const resp = await client.put<ApiResponse<AdGroup>>(`/adgroups/${adGroupId}`, body);
         return {
           content: [
             { type: "text", text: `Updated ad group "${resp.data.name}" (ID: ${resp.data.id})` },
@@ -189,7 +190,7 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
     },
     async ({ campaignId, adGroupId }) => {
       try {
-        await client.delete<unknown>(`/campaigns/${campaignId}/adgroups/${adGroupId}`);
+        await client.delete<unknown>(`/adgroups/${adGroupId}`);
         return {
           content: [{ type: "text", text: `Deleted ad group ${adGroupId} from campaign ${campaignId}.` }],
         };
@@ -212,12 +213,12 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
     },
     async ({ campaignId, adGroupId }) => {
       try {
-        const resp = await client.get<ApiResponse<AdGroup>>(`/campaigns/${campaignId}/adgroups/${adGroupId}`);
+        const resp = await client.get<ApiResponse<AdGroup>>(`/adgroups/${adGroupId}`);
         const ag = resp.data;
         const text = [
           `Ad Group: ${ag.name} (ID: ${ag.id})`,
           `Status: ${ag.displayStatus}`,
-          `Default Bid: ${formatMoney(ag.defaultBidAmount)}`,
+          `Default Bid: ${formatMoney(adGroupBid(ag))}`,
           ag.cpaGoal ? `CPA Goal: ${formatMoney(ag.cpaGoal)}` : null,
           `Search Match: ${ag.automatedKeywordsOptIn ? "on" : "off"}`,
         ].filter(Boolean).join("\n");
@@ -252,19 +253,21 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
         validateDate(startDate, "startDate");
         validateDate(endDate, "endDate");
 
-        const reportReq: ReportingRequest = {
-          startTime: startDate,
-          endTime: endDate,
+        const reportReq = buildV1Report({
+          startDate,
+          endDate,
           granularity: granularity ?? "DAILY",
-          selector: buildSelector({ limit: 1000, sortBy: "localSpend", sortOrder: "DESCENDING" }),
-          returnRowTotals: true,
-        };
+          limit: 1000,
+          sortBy: "localSpend",
+          sortOrder: "DESCENDING",
+          filters: [equalsFilter("campaignId", campaignId)],
+        });
 
         const resp = await client.post<ReportResponse<{ adGroupId: number; adGroupName: string }>>(
-          `/reports/campaigns/${campaignId}/adgroups`,
+          "/reports/apps/adgroups/query",
           reportReq
         );
-        const rows = resp.data.reportingDataResponse.row;
+        const rows = normalizeReportRows<{ adGroupId: number; adGroupName: string; name?: string; id?: number }>(resp.data);
 
         if (rows.length === 0) {
           return { content: [{ type: "text", text: "No ad group data found for the specified date range." }] };
@@ -272,7 +275,7 @@ Defaults: status=ENABLED, pricingModel=CPC, startTime=today, Search Match off. T
 
         const summaries = rows.map((row) => {
           return [
-            `Ad Group: ${row.metadata.adGroupName} (ID: ${row.metadata.adGroupId})`,
+            `Ad Group: ${row.metadata.adGroupName ?? row.metadata.name} (ID: ${row.metadata.adGroupId ?? row.metadata.id})`,
             formatMetrics(row.total),
           ].join("\n");
         });

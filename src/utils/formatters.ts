@@ -25,12 +25,25 @@ export function formatMetrics(m: MetricData): string {
 }
 
 export function formatCampaignSummary(c: Campaign): string {
+  const v1 = c as Campaign & {
+    dailyBudget?: { value?: { amount: string; currency: string } };
+    targeting?: { countryOrRegion?: { include?: string[] } };
+    promotedObjectId?: string | number;
+    systemStatus?: string;
+  };
+  const daily = c.dailyBudgetAmount ?? v1.dailyBudget?.value ?? null;
+  const countries = c.countriesOrRegions ?? v1.targeting?.countryOrRegion?.include;
+  const adamId = c.adamId ?? v1.promotedObjectId;
+  const status = c.displayStatus ?? v1.systemStatus ?? c.status;
+  const budgetLine = c.budgetAmount
+    ? `Budget: ${formatMoney(c.budgetAmount)} (Daily: ${formatMoney(daily)})`
+    : `Daily budget: ${formatMoney(daily)} (lifetime budget is not used on Platform API v1)`;
   return [
     `Campaign: ${c.name} (ID: ${c.id})`,
-    `Status: ${c.displayStatus}`,
-    `Budget: ${formatMoney(c.budgetAmount)} (Daily: ${formatMoney(c.dailyBudgetAmount)})`,
-    `Countries: ${c.countriesOrRegions?.join(", ") ?? "N/A"}`,
-    `App Adam ID: ${c.adamId}`,
+    `Status: ${status}`,
+    budgetLine,
+    `Countries: ${countries?.join(", ") ?? "N/A"}`,
+    `App Adam ID: ${adamId ?? "N/A"}`,
   ].join("\n");
 }
 
@@ -52,9 +65,11 @@ export function formatBudgetOrderSummary(bo: BudgetOrder): string {
   return [
     `Budget Order: ${bo.name} (ID: ${bo.id})`,
     `Status: ${bo.status}`,
-    `Budget: ${formatMoney(bo.budget)}`,
-    `Start: ${bo.startDate}`,
-    bo.endDate ? `End: ${bo.endDate}` : null,
+    `Budget: ${formatMoney(bo.budget ?? (bo as BudgetOrder & { value?: { amount: string; currency: string } }).value)}`,
+    `Start: ${bo.startDate ?? (bo as BudgetOrder & { startTime?: string }).startTime ?? "N/A"}`,
+    (bo.endDate ?? (bo as BudgetOrder & { endTime?: string }).endTime)
+      ? `End: ${bo.endDate ?? (bo as BudgetOrder & { endTime?: string }).endTime}`
+      : null,
     bo.orderNumber ? `Order #: ${bo.orderNumber}` : null,
   ]
     .filter(Boolean)
@@ -64,8 +79,8 @@ export function formatBudgetOrderSummary(bo: BudgetOrder): string {
 export function formatCreativeSummary(c: Creative): string {
   return [
     `Creative: ${c.name} (ID: ${c.id})`,
-    `Type: ${c.type}`,
-    `State: ${c.state}`,
+    `Type: ${c.type ?? (c as Creative & { creativeType?: string }).creativeType ?? "N/A"}`,
+    `State: ${c.state ?? (c as Creative & { systemStatus?: string }).systemStatus ?? "N/A"}`,
     `Adam ID: ${c.adamId}`,
   ].join("\n");
 }

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  MCP server for the <a href="https://developer.apple.com/documentation/apple_search_ads">Apple Search Ads API v5</a>.<br>
+  MCP server for the <a href="https://developer.apple.com/documentation/apple-ads-platform-api">Apple Ads Platform API v1</a> (<code>https://api.ads.apple.com/v1</code>).<br>
   Connect it to any MCP-compatible AI client and manage your campaigns, keywords, budgets, and reporting through natural language.
 </p>
 
@@ -30,7 +30,7 @@
 > *"Pause the brand campaign and increase the budget on discovery to $500."*
 > *"What search terms are triggering my ads? Add the best ones as exact-match keywords."*
 
-Supports 54 tools, 3 resources, and 6 prompts — campaigns, ad groups, keywords, creatives, budgets, search terms, geo targeting, impression share, and performance reports.
+Supports the existing campaign, ad group, keyword, negative keyword, and report tools on Platform API v1, plus ad-account selection, keyword suggestions, and search-term popularity. Campaign Management API v5 (`api.searchads.apple.com/api/v5`) shuts down on January 26, 2027.
 
 ### Features at a glance
 
@@ -119,7 +119,7 @@ Copy the entire output (including the `BEGIN` / `END` lines), then:
 
 Pick your client below and fill in your **clientId**, **teamId**, and **keyId** from Step 2, and the **full path** to your private key from Step 3.
 
-> **Multiple orgs?** Omit `ASA_ORG_ID` and use `list_organizations` / `switch_organization` at runtime. Or set it in `env` to pick a default.
+> **Ad account, not org id.** Platform API v1 sends `X-AP-Context: adAccountId=<id>`. That id comes from `list_ad_accounts` (`adAccount.id`) or `ASA_AD_ACCOUNT_ID`. It is not `ASA_ORG_ID` and not the parent `orgId` on the ACL. `ASA_ORG_ID` is ignored for the request context. Omit `ASA_AD_ACCOUNT_ID` and call `list_ad_accounts` then `switch_ad_account` at runtime, or set `ASA_AD_ACCOUNT_ID` as the default.
 
 ---
 
@@ -140,7 +140,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
         "ASA_CLIENT_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "ASA_TEAM_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "ASA_KEY_ID": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem"
+        "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem",
+        "ASA_AD_ACCOUNT_ID": "123456789"
       }
     }
   }
@@ -160,6 +161,7 @@ claude mcp add apple-ads \
   -e ASA_TEAM_ID=SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
   -e ASA_KEY_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
   -e ASA_PRIVATE_KEY_PATH=/Users/yourname/apple-ads-key-pkcs8.pem \
+  -e ASA_AD_ACCOUNT_ID=123456789 \
   -- npx -y apple-ads-mcp
 ```
 
@@ -180,7 +182,8 @@ Add to `.cursor/mcp.json`:
         "ASA_CLIENT_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "ASA_TEAM_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "ASA_KEY_ID": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem"
+        "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem",
+        "ASA_AD_ACCOUNT_ID": "123456789"
       }
     }
   }
@@ -205,7 +208,9 @@ Add to your `settings.json`:
           "ASA_CLIENT_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
           "ASA_TEAM_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
           "ASA_KEY_ID": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-          "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem"
+          "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem",
+          "ASA_AD_ACCOUNT_ID": "123456789",
+        "ASA_AD_ACCOUNT_ID": "123456789"
         }
       }
     }
@@ -230,7 +235,8 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
         "ASA_CLIENT_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "ASA_TEAM_ID": "SEARCHADS.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
         "ASA_KEY_ID": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-        "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem"
+        "ASA_PRIVATE_KEY_PATH": "/Users/yourname/apple-ads-key-pkcs8.pem",
+        "ASA_AD_ACCOUNT_ID": "123456789"
       }
     }
   }
@@ -256,7 +262,8 @@ Set these environment variables:
 | `ASA_TEAM_ID` | Your team ID (starts with `SEARCHADS.`) |
 | `ASA_KEY_ID` | Your key ID (UUID) |
 | `ASA_PRIVATE_KEY_PATH` | Absolute path to your PKCS#8 private key |
-| `ASA_ORG_ID` | *(optional)* Organization ID to use by default |
+| `ASA_AD_ACCOUNT_ID` | *(optional)* Ad account id for `X-AP-Context`. Not an organization id. |
+| `ASA_ORG_ID` | *(optional)* Parent organization id. Not used as the API context. |
 
 </details>
 
@@ -336,14 +343,49 @@ The server exposes 3 resources:
 
 ---
 
+## Platform API v1
+
+Auth is unchanged: OAuth2 client-credentials with a client-secret JWT and scope `searchadsorg`. The base URL is `https://api.ads.apple.com/v1`. Account-scoped calls send `X-AP-Context: adAccountId=<ad account id>`. `GET /v1/me` and `GET /v1/acls` omit that header.
+
+| Kept env var | Role |
+|---|---|
+| `ASA_CLIENT_ID` | OAuth client id |
+| `ASA_TEAM_ID` | JWT issuer |
+| `ASA_KEY_ID` | JWT key id |
+| `ASA_PRIVATE_KEY_PATH` or `ASA_PRIVATE_KEY` | PKCS#8 private key |
+| `ASA_AD_ACCOUNT_ID` | Optional ad account id. Not an organization id. |
+| `ASA_ORG_ID` | Optional parent org id. Not sent as the API context. |
+
+New tools: `list_ad_accounts`, `switch_ad_account`, `get_keyword_suggestions` (`POST /v1/suggestions/keywords/query`), `get_search_term_popularity` (`POST /v1/insights/apps/search-term-popularity/query`).
+
+Lifetime budget is deprecated and is not sent. Keyword and negative-keyword writes use the flat v1 resources. `ACTIVE` on a keyword is sent as `ENABLED`. Negative keywords are one resource: campaign scope sets `campaignId`, ad group scope sets `adGroupId`.
+
+These v5 calls have no v1 equivalent and return that explanation instead of calling the old host:
+
+- `get_impression_share_report_by_id` and `list_impression_share_reports` (no stored custom-report ids; `create_impression_share_report` is the synchronous insights query and needs `adamId`)
+- `search_geolocations`
+- resources `apple-ads://countries` and `apple-ads://device-sizes`
+
+`list_organizations` and `switch_organization` still exist. Listing shows ad accounts and their parent org ids. Switching an org does not select the ad account.
+
+Keyword popularity for an app (not the campaign search-term report):
+
+```text
+list_ad_accounts
+switch_ad_account  { "adAccountId": "<adAccount.id>" }
+get_keyword_suggestions  { "adamId": 1615045598, "countriesOrRegions": ["PL"] }
+```
+
+`get_search_term_popularity` is the genre-level App Store ranking (`countryOrRegion` + `genre`), not an adamId lookup.
+
 <details>
 <summary><strong>Troubleshooting</strong></summary>
 
 > **"pkcs8 must be PKCS#8 formatted string"**
 > Your key is in the wrong format. Re-run the `openssl pkcs8` command from [Step 3](#step-3--generate-your-key-pair).
 
-> **"No organization selected"**
-> Use `list_organizations` then `switch_organization`, or add `ASA_ORG_ID` to your config.
+> **"No ad account selected"**
+> Call `list_ad_accounts`, then `switch_ad_account` with `adAccount.id`, or set `ASA_AD_ACCOUNT_ID`. Do not reuse an organization id.
 
 > **"Token request failed (401)"**
 > Verify your **clientId**, **teamId**, and **keyId** match Apple's API tab. Check that you uploaded your public key.

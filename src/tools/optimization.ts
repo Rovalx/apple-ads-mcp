@@ -2,12 +2,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiResponse, ApiListResponse, Campaign, AdGroup } from "../types/apple-ads.js";
-import type { ReportingRequest, ReportResponse } from "../types/reporting.js";
+import type { ReportResponse } from "../types/reporting.js";
 import { resolveDateRange, type DatePreset } from "../utils/date-helpers.js";
-import { buildSelector } from "../utils/selectors.js";
 import { formatCampaignSummary, formatMetrics, formatMoney } from "../utils/formatters.js";
 import { handleToolError } from "../utils/error-handler.js";
 import { validateDate } from "../utils/validators.js";
+import { adGroupBid, buildV1Query, buildV1Report, campaignDailyBudget, equalsFilter, normalizeReportRows } from "../utils/v1.js";
 
 export function registerOptimizationTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool(
@@ -35,47 +35,51 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
         const [campaignResp, adGroupsResp, keywordReport, searchTermReport, dailyReport] =
           await Promise.all([
             client.get<ApiResponse<Campaign>>(`/campaigns/${campaignId}`),
-            client.get<ApiListResponse<AdGroup>>(`/campaigns/${campaignId}/adgroups`, { limit: "50" }),
+            client.post<ApiListResponse<AdGroup>>(
+              "/adgroups/query",
+              buildV1Query({ limit: 50, filters: [equalsFilter("campaignId", campaignId)] })
+            ),
             client.post<ReportResponse<{ keywordId: number; keyword: string; matchType: string; bidAmount: { amount: string; currency: string } }>>(
-              `/reports/campaigns/${campaignId}/keywords`,
-              {
-                startTime: startDate,
-                endTime: endDate,
-                selector: buildSelector({ limit: n, sortBy: "localSpend", sortOrder: "DESCENDING" }),
-                returnRowTotals: true,
-              } satisfies ReportingRequest
+              "/reports/apps/keywords/query",
+              buildV1Report({
+                startDate,
+                endDate,
+                limit: n,
+                sortBy: "localSpend",
+                sortOrder: "DESCENDING",
+                filters: [equalsFilter("campaignId", campaignId)],
+              })
             ),
             client.post<ReportResponse<{ searchTermText: string; keyword: string; matchType: string }>>(
-              `/reports/campaigns/${campaignId}/searchterms`,
-              {
-                startTime: startDate,
-                endTime: endDate,
-                selector: buildSelector({ limit: n, sortBy: "localSpend", sortOrder: "DESCENDING" }),
-                returnRowTotals: true,
-              } satisfies ReportingRequest
+              "/reports/apps/searchterms/query",
+              buildV1Report({
+                startDate,
+                endDate,
+                limit: n,
+                sortBy: "localSpend",
+                sortOrder: "DESCENDING",
+                filters: [equalsFilter("campaignId", campaignId)],
+              })
             ),
             client.post<ReportResponse<{ campaignId: number }>>(
-              "/reports/campaigns",
-              {
-                startTime: startDate,
-                endTime: endDate,
+              "/reports/apps/campaigns/query",
+              buildV1Report({
+                startDate,
+                endDate,
                 granularity: "DAILY",
-                selector: buildSelector({
-                  limit: 1,
-                  sortBy: "localSpend",
-                  sortOrder: "DESCENDING",
-                  conditions: [{ field: "campaignId", operator: "EQUALS", values: [String(campaignId)] }],
-                }),
-                returnRowTotals: true,
-              } satisfies ReportingRequest
+                limit: 1,
+                sortBy: "localSpend",
+                sortOrder: "DESCENDING",
+                filters: [equalsFilter("campaignId", campaignId)],
+              })
             ),
           ]);
 
         const campaign = campaignResp.data;
         const adGroups = adGroupsResp.data;
-        const keywords = keywordReport.data.reportingDataResponse.row;
-        const searchTerms = searchTermReport.data.reportingDataResponse.row;
-        const dailyRows = dailyReport.data.reportingDataResponse.row;
+        const keywords = normalizeReportRows<{ keywordId: number; keyword: string; matchType: string; bidAmount: { amount: string; currency: string } }>(keywordReport.data);
+        const searchTerms = normalizeReportRows<{ searchTermText: string; keyword: string; matchType: string }>(searchTermReport.data);
+        const dailyRows = normalizeReportRows<{ campaignId: number }>(dailyReport.data);
 
         // Build comprehensive summary
         const sections: string[] = [];
@@ -94,7 +98,7 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
         // Ad groups
         sections.push(`\n=== AD GROUPS (${adGroups.length}) ===`);
         for (const ag of adGroups) {
-          sections.push(`• ${ag.name} (ID: ${ag.id}) — ${ag.displayStatus} — Default Bid: ${formatMoney(ag.defaultBidAmount)}`);
+          sections.push(`• ${ag.name} (ID: ${ag.id}) — ${ag.displayStatus} — Default Bid: ${formatMoney(adGroupBid(ag))}`);
         }
 
         // Top keywords
@@ -163,21 +167,22 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
 
         // Get campaigns and their reports in parallel
         const [campaignsResp, reportResp] = await Promise.all([
-          client.get<ApiListResponse<Campaign>>("/campaigns", { limit: "200" }),
+          client.post<ApiListResponse<Campaign>>("/campaigns/query", buildV1Query({ limit: 200 })),
           client.post<ReportResponse<{ campaignId: number; campaignName: string }>>(
-            "/reports/campaigns",
-            {
-              startTime: startDate,
-              endTime: endDate,
-              selector: buildSelector({ limit: 200, sortBy: "localSpend", sortOrder: "DESCENDING" }),
-              returnRowTotals: true,
-              returnGrandTotals: true,
-            } satisfies ReportingRequest
+            "/reports/apps/campaigns/query",
+            buildV1Report({
+              startDate,
+              endDate,
+              limit: 200,
+              sortBy: "localSpend",
+              sortOrder: "DESCENDING",
+              includeGrandTotal: true,
+            })
           ),
         ]);
 
         const campaigns = campaignsResp.data;
-        const rows = reportResp.data.reportingDataResponse.row;
+        const rows = normalizeReportRows<{ campaignId: number; campaignName: string }>(reportResp.data);
 
         const dayCount = Math.max(1, Math.ceil(
           (new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24)
@@ -187,7 +192,8 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
           const reportRow = rows.find((r) => r.metadata.campaignId === campaign.id);
           const totalSpend = reportRow?.total?.localSpend?.amount ? parseFloat(reportRow.total.localSpend.amount) : 0;
           const dailyRate = totalSpend / dayCount;
-          const dailyBudget = campaign.dailyBudgetAmount ? parseFloat(campaign.dailyBudgetAmount.amount) : 0;
+          const dailyMoney = campaignDailyBudget(campaign);
+          const dailyBudget = dailyMoney ? parseFloat(dailyMoney.amount) : 0;
           const totalBudget = campaign.budgetAmount ? parseFloat(campaign.budgetAmount.amount) : 0;
           const budgetUtilization = dailyBudget > 0 ? (dailyRate / dailyBudget) * 100 : 0;
           const remainingBudget = totalBudget - totalSpend;
@@ -198,7 +204,7 @@ export function registerOptimizationTools(server: McpServer, client: AppleAdsCli
             campaignId: campaign.id,
             status: campaign.displayStatus,
             totalBudget: formatMoney(campaign.budgetAmount),
-            dailyBudget: formatMoney(campaign.dailyBudgetAmount),
+            dailyBudget: formatMoney(dailyMoney),
             totalSpend: totalSpend.toFixed(2),
             dailyRate: dailyRate.toFixed(2),
             budgetUtilization: `${budgetUtilization.toFixed(1)}%`,

@@ -7,6 +7,12 @@ export interface Config {
   teamId: string;
   keyId: string;
   privateKey: string;
+  /**
+   * Platform API v1 request context. Not the same value as an organization id.
+   * Comes from ASA_AD_ACCOUNT_ID or a previous switch_ad_account.
+   */
+  adAccountId?: string;
+  /** Kept for callers that still set ASA_ORG_ID. Never sent as X-AP-Context. */
   orgId?: string;
 }
 
@@ -14,7 +20,9 @@ export function loadConfig(): Config {
   const clientId = requireEnv("ASA_CLIENT_ID");
   const teamId = requireEnv("ASA_TEAM_ID");
   const keyId = requireEnv("ASA_KEY_ID");
-  const orgId = process.env.ASA_ORG_ID || loadState().orgId || undefined;
+  const state = loadState();
+  const adAccountId = process.env.ASA_AD_ACCOUNT_ID || state.adAccountId || undefined;
+  const orgId = process.env.ASA_ORG_ID || state.orgId || undefined;
 
   const inlineKey = process.env.ASA_PRIVATE_KEY;
   const keyPath = process.env.ASA_PRIVATE_KEY_PATH;
@@ -37,7 +45,7 @@ export function loadConfig(): Config {
     );
   }
 
-  return { clientId, teamId, keyId, privateKey, orgId };
+  return { clientId, teamId, keyId, privateKey, adAccountId, orgId };
 }
 
 function requireEnv(name: string): string {

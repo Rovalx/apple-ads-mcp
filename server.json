@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Happygallo/apple-ads",
-  "description": "Manage Apple Search Ads campaigns, keywords, budgets, and reports via API v5.",
+  "description": "Manage Apple Ads campaigns, keywords, budgets, and reports via Platform API v1.",
   "repository": {
     "url": "https://github.com/Happygallo/apple-ads-mcp",
     "source": "github"
   },
-  "version": "1.0.4",
+  "version": "2.0.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "apple-ads-mcp",
-      "version": "1.0.4",
+      "version": "2.0.0",
       "transport": {
         "type": "stdio"
       },

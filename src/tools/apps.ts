@@ -2,8 +2,8 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppleAdsClient } from "../client/api-client.js";
 import type { ApiListResponse, ApiResponse, AppInfo, AppEligibility, GeoLocation } from "../types/apple-ads.js";
-import { buildSelector } from "../utils/selectors.js";
 import { handleToolError } from "../utils/error-handler.js";
+import { buildV1Query, equalsFilter, inFilter } from "../utils/v1.js";
 
 export function registerAppTools(server: McpServer, client: AppleAdsClient) {
   server.registerTool(
@@ -53,18 +53,11 @@ export function registerAppTools(server: McpServer, client: AppleAdsClient) {
     },
     async ({ adamId, countriesOrRegions }) => {
       try {
-        const body: Record<string, unknown> = {
-          pagination: { offset: 0, limit: 100 },
-        };
-        if (countriesOrRegions?.length) {
-          body.conditions = [
-            { field: "countryOrRegion", operator: "IN", values: countriesOrRegions },
-          ];
-        }
-
+        const filters = [equalsFilter("adamId", adamId)];
+        if (countriesOrRegions?.length) filters.push(inFilter("countryOrRegion", countriesOrRegions));
         const resp = await client.post<ApiListResponse<AppEligibility>>(
-          `/apps/${adamId}/eligibilities/find`,
-          body
+          "/eligibilities/apps/query",
+          buildV1Query({ limit: 100, filters })
         );
 
         if (resp.data.length === 0) {
@@ -115,7 +108,10 @@ export function registerAppTools(server: McpServer, client: AppleAdsClient) {
         ];
 
         if (includeLocales) {
-          const locales = await client.get<ApiListResponse<Record<string, unknown>>>(`/apps/${adamId}/locale-details`);
+          const locales = await client.post<ApiListResponse<Record<string, unknown>>>(
+            `/apps/${adamId}/locale-details/query`,
+            buildV1Query({ limit: 100 })
+          );
           content.push(
             { type: "text", text: `\n${locales.data.length} locale(s):` },
             { type: "text", text: JSON.stringify(locales.data, null, 2) },
@@ -150,8 +146,17 @@ export function registerAppTools(server: McpServer, client: AppleAdsClient) {
     },
     async ({ adamId, limit, offset, sortBy, sortOrder, conditions }) => {
       try {
-        const selector = buildSelector({ limit, offset, sortBy, sortOrder, conditions });
-        const resp = await client.post<ApiListResponse<Record<string, unknown>>>(`/apps/${adamId}/assets/find`, selector);
+        const resp = await client.post<ApiListResponse<Record<string, unknown>>>(
+          "/assets/query",
+          buildV1Query({
+            limit: limit ?? 1000,
+            offset,
+            sortBy,
+            sortOrder,
+            conditions,
+            filters: [equalsFilter("adamId", adamId)],
+          })
+        );
 
         return {
           content: [
@@ -171,7 +176,7 @@ export function registerAppTools(server: McpServer, client: AppleAdsClient) {
     "search_geolocations",
     {
       title: "Search / Lookup Geo Locations",
-      description: "Search or look up geo locations for campaign geo targeting. Search by name (query) to find locations, or provide geoIds to look up specific locations by ID. Returns location display name, entity type (Country/AdminArea/Locality), and ID for use in ad group targeting.",
+      description: "Not available on Apple Ads Platform API v1. Campaign Management API v5 GET/POST /search/geo has no published equivalent. The preview notes that geolocation targeting ids will be documented later, and product-page country/device lists also have no v1 replacement. Params are kept so existing clients get a clear error instead of a v5 call.",
       inputSchema: {
         query: z.string().optional().describe("Search query (e.g., 'New York', 'United Kingdom')"),
         entity: z.string().optional().describe("Entity type filter: Country, AdminArea, Locality"),
@@ -180,44 +185,14 @@ export function registerAppTools(server: McpServer, client: AppleAdsClient) {
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async ({ query, entity, countryCode, geoIds }) => {
-      try {
-        if (!query && !geoIds?.length) {
-          return { content: [{ type: "text", text: "Please provide either a query or geoIds." }] };
-        }
-
-        let resp: ApiListResponse<GeoLocation>;
-
-        if (geoIds?.length) {
-          const geoRequests = geoIds.map((id) => {
-            const pipes = id.split("|").length - 1;
-            const inferredEntity = pipes >= 2 ? "Locality" : pipes === 1 ? "AdminArea" : "Country";
-            return { id, entity: inferredEntity };
-          });
-          resp = await client.post<ApiListResponse<GeoLocation>>("/search/geo", geoRequests);
-        } else {
-          const params: Record<string, string> = { query: query! };
-          if (entity) params.entity = entity;
-          if (countryCode) params.countrycode = countryCode;
-          resp = await client.get<ApiListResponse<GeoLocation>>("/search/geo", params);
-        }
-
-        const text = resp.data
-          .map((geo) => {
-            const base = `${geo.displayName} (${geo.entity}, ID: ${geo.id})`;
-            return geo.countryOrRegion ? `${base} — ${geo.countryOrRegion}` : base;
-          })
-          .join("\n");
-
-        return {
-          content: [
-            { type: "text", text: `Found ${resp.data.length} location(s):\n${text}` },
-            { type: "text", text: JSON.stringify(resp.data, null, 2) },
-          ],
-        };
-      } catch (err) {
-        return handleToolError(err);
-      }
+    async () => {
+      return {
+        content: [{
+          type: "text",
+          text: "search_geolocations cannot be ported. Apple Ads Platform API v1 does not publish the Campaign Management API v5 /search/geo endpoint. Product-page country and device lookups also have no v1 equivalent. Geo targeting id lookup was marked as coming later in Apple's July 2026 preview.",
+        }],
+        isError: true,
+      };
     }
   );
 }
